@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_LENGTH};
 use reqwest::{Method, StatusCode};
 use serde::{Deserialize, Serialize};
 
@@ -217,6 +217,12 @@ impl CloudClient {
 
     /// Create an empty folder. Mirrors `DocumentStorage.createFolder` in
     /// the extension: empty body, `Content-Type: folder`.
+    ///
+    /// The tectonic frontends (`web.<region>.tectonic.remarkable.com`)
+    /// reject POSTs that carry neither `Content-Length` nor
+    /// `Transfer-Encoding` with `411 Length Required`, so we pin
+    /// `Content-Length: 0` explicitly rather than trusting the HTTP stack
+    /// to emit it for an empty body (issue #4).
     pub async fn create_folder(&self, name: &str, parent: Option<&str>) -> Result<FileItem> {
         let url = self.url("/doc/v2/files");
         let meta = Self::encode_meta(name, parent, None, None);
@@ -225,6 +231,7 @@ impl CloudClient {
             reqwest::header::CONTENT_TYPE,
             HeaderValue::from_static("folder"),
         );
+        headers.insert(CONTENT_LENGTH, HeaderValue::from_static("0"));
         let resp = self
             .http
             .post(url)
@@ -401,6 +408,50 @@ mod tests {
         assert_eq!(v["parent"], "p1");
         assert_eq!(v["orientation"], "portrait");
         assert_eq!(v["convert"], true);
+    }
+
+    /// The tectonic frontends answer `411 Length Required` when a POST
+    /// arrives without a `Content-Length` header (issue #4). Drive
+    /// `create_folder` against a local socket and assert the header is on
+    /// the wire.
+    #[tokio::test]
+    async fn create_folder_sends_content_length_zero() {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 1024];
+            loop {
+                let n = stream.read(&mut chunk).unwrap();
+                buf.extend_from_slice(&chunk[..n]);
+                // Content-Length is 0, so the head *is* the whole request.
+                if n == 0 || buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                .unwrap();
+            String::from_utf8_lossy(&buf).into_owned()
+        });
+
+        let client = CloudClient::new("test-token", format!("http://{addr}")).unwrap();
+        client.create_folder("Notes", None).await.unwrap();
+
+        let request = server.join().unwrap().to_ascii_lowercase();
+        assert!(
+            request.starts_with("post /doc/v2/files"),
+            "unexpected request line: {request}"
+        );
+        assert!(
+            request.contains("content-length: 0"),
+            "empty-body POST must carry Content-Length: 0 or tectonic answers 411: {request}"
+        );
+        assert!(request.contains("content-type: folder"));
     }
 
     #[test]

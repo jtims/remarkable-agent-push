@@ -71,6 +71,11 @@ pub enum Command {
         #[arg(long, value_enum, default_value_t = DeviceArg::PaperPro)]
         device: DeviceArg,
 
+        /// Parent folder UUID; the document lands inside that folder
+        /// instead of at root. Get folder ids from `rr ls --folders`.
+        #[arg(short, long, value_name = "FOLDER_UUID")]
+        parent: Option<String>,
+
         /// Skip markdown parsing and ship a pre-built `.rm` v6 page verbatim
         /// as the page content. Useful for isolating whether issues are
         /// in the v6 generator or in the cloud bundle layer.
@@ -225,8 +230,9 @@ async fn dispatch(command: Command) -> Result<()> {
             file,
             title,
             device,
+            parent,
             rm,
-        } => handle_push(file, title, device, rm).await,
+        } => handle_push(file, title, device, parent, rm).await,
         Command::ConnectPush {
             file,
             title,
@@ -251,8 +257,24 @@ async fn handle_push(
     file: PathBuf,
     custom_title: Option<String>,
     device: DeviceArg,
+    parent: Option<String>,
     rm_override: Option<PathBuf>,
 ) -> Result<()> {
+    // Validate --parent up front, before any network work: folder ids are
+    // UUIDs (see `rr ls --folders`); anything else would silently produce
+    // a document orphaned under a nonexistent parent.
+    let parent = match parent.as_deref().map(str::trim) {
+        Some(p) => {
+            uuid::Uuid::parse_str(p).map_err(|_| {
+                anyhow::anyhow!(
+                    "--parent '{p}' is not a folder UUID; run `rr ls --folders` to find folder ids"
+                )
+            })?;
+            Some(p.to_owned())
+        }
+        None => None,
+    };
+
     // Token: reuse the same load+refresh path the cloud upload uses; sync v3
     // takes the same bearer.
     let mut cfg = Config::load()?;
@@ -289,7 +311,12 @@ async fn handle_push(
     // Split on `---` horizontal rules to create multi-page notebooks.
     // Each chunk becomes one page with its tables rendered as images.
     let pages = crate::notebook::PageInput::pages_from_markdown(&md);
-    let opts = crate::notebook::BundleOptions::new(title.clone(), pages).with_device(device.into());
+    let mut opts =
+        crate::notebook::BundleOptions::new(title.clone(), pages).with_device(device.into());
+    if let Some(p) = parent {
+        println!("  parent folder: {p}");
+        opts = opts.with_parent(p);
+    }
     let mut bundle = crate::notebook::Bundle::build(&opts)?;
 
     if let Some(rm_path) = rm_override {

@@ -325,6 +325,15 @@ impl BundleOptions {
         self.device = device;
         self
     }
+
+    /// Place the document inside an existing folder. `parent` is the
+    /// folder's UUID (as shown by `rr ls --folders`). An empty string —
+    /// the default — keeps the document at the root, which is what the
+    /// device expects for top-level items.
+    pub fn with_parent(mut self, parent: impl Into<String>) -> Self {
+        self.parent = parent.into();
+        self
+    }
 }
 
 /// A materialised notebook ready to be written to disk.
@@ -805,6 +814,26 @@ mod tests {
         assert!(!bundle.pages[0].rm_bytes.is_empty());
         // The .rm bytes must parse back as a v6 file.
         crate::v6::parse(&bundle.pages[0].rm_bytes).expect("rm bytes parse");
+    }
+
+    #[test]
+    fn bundle_metadata_carries_parent_uuid_when_set() {
+        let parent = "581e3dc3-267f-47a1-9d4e-cad298d85483";
+        let opts = BundleOptions::new("Parented", vec![PageInput::from_markdown("hi")])
+            .with_parent(parent);
+        let bundle = Bundle::build(&opts).unwrap();
+        let meta: serde_json::Value = serde_json::from_str(&bundle.metadata_json).unwrap();
+        assert_eq!(meta["parent"], parent);
+    }
+
+    #[test]
+    fn bundle_metadata_parent_defaults_to_empty_string_for_root() {
+        let opts = BundleOptions::new("Rooted", vec![PageInput::from_markdown("hi")]);
+        let bundle = Bundle::build(&opts).unwrap();
+        let meta: serde_json::Value = serde_json::from_str(&bundle.metadata_json).unwrap();
+        // Root placement is an *empty string* parent (not absent): that's
+        // what the device writes for its own top-level documents.
+        assert_eq!(meta["parent"], "");
     }
 
     #[test]
