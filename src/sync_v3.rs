@@ -194,40 +194,40 @@ impl SyncClient {
     /// `.metadata` blob inside it). Per-doc work is fanned out with a
     /// bounded concurrency so a 200-document library still completes in a
     /// few seconds without hammering the server.
-    pub async fn list_documents(&self) -> Result<Vec<DocumentInfo>> {
+    ///
+    /// An entry whose metadata cannot be read is never dropped silently:
+    /// it comes back in [`Listing::skipped`] so the caller has to say so.
+    pub async fn list_documents(&self) -> Result<Listing> {
         const FETCH_CONCURRENCY: usize = 16;
 
         let root = self.load_root().await?;
         let results = stream::iter(root.entries)
             .map(|entry| async move {
                 let id = entry.id.clone();
-                match self.fetch_document_info(&entry).await {
-                    Ok(info) => Some(info),
-                    Err(e) => {
-                        tracing::warn!(doc = %id, error = %e, "skip doc: metadata fetch failed");
-                        None
-                    }
+                // One retry, and only for a retryable error: the omission
+                // seen live was a transient fetch on a slow link, and
+                // nothing else on this read path retries.
+                let mut fetched = self.fetch_document_info(&entry).await;
+                let retry = match &fetched {
+                    Err(e) => e.is_retryable(),
+                    Ok(_) => false,
+                };
+                if retry {
+                    fetched = self.fetch_document_info(&entry).await;
                 }
+                fetched.map_err(|e| {
+                    tracing::warn!(doc = %id, error = %e, "skip doc: metadata fetch failed");
+                    SkippedEntry {
+                        id,
+                        error: e.to_string(),
+                    }
+                })
             })
             .buffer_unordered(FETCH_CONCURRENCY)
             .collect::<Vec<_>>()
             .await;
 
-        let mut out: Vec<DocumentInfo> = results.into_iter().flatten().collect();
-        // Folders first, then documents, alphabetised within each group.
-        // This matches what `rr ls` users have grown used to and keeps
-        // output deterministic for golden tests.
-        out.sort_by(|a, b| {
-            let ord = b.is_folder().cmp(&a.is_folder());
-            if ord != std::cmp::Ordering::Equal {
-                ord
-            } else {
-                a.visible_name
-                    .to_lowercase()
-                    .cmp(&b.visible_name.to_lowercase())
-            }
-        });
-        Ok(out)
+        Ok(partition_listing(results))
     }
 
     /// For one root entry: GET its `.docSchema` index, find the entry whose
@@ -778,6 +778,72 @@ impl DocumentInfo {
     }
 }
 
+/// What [`SyncClient::list_documents`] could and could not read.
+///
+/// A listing that hides an entry can read as data loss, or mask it, so
+/// `skipped` travels with the documents and callers must surface it.
+#[derive(Debug, Clone)]
+pub struct Listing {
+    pub docs: Vec<DocumentInfo>,
+    pub skipped: Vec<SkippedEntry>,
+}
+
+/// A root entry whose metadata could not be fetched or decoded.
+#[derive(Debug, Clone)]
+pub struct SkippedEntry {
+    pub id: String,
+    pub error: String,
+}
+
+impl Listing {
+    /// `None` when every root entry was read. Otherwise the text `rr ls`
+    /// prints: how many entries are missing from the listing, and which.
+    pub fn incomplete_summary(&self) -> Option<String> {
+        if self.skipped.is_empty() {
+            return None;
+        }
+        let k = self.skipped.len();
+        let total = self.docs.len() + k;
+        let mut out = format!("INCOMPLETE: {k} of {total} root entries");
+        out.push_str(" could not be read and are not shown:");
+        for s in &self.skipped {
+            out.push_str(&format!("\n  {}  ({})", s.id, s.error));
+        }
+        Some(out)
+    }
+}
+
+type FetchOutcome = std::result::Result<DocumentInfo, SkippedEntry>;
+
+/// Split per-entry results into readable documents and skipped entries.
+/// Documents sort folders first, then by name; skipped entries sort by id,
+/// so the output is the same whatever order the fetches finished in.
+fn partition_listing(results: Vec<FetchOutcome>) -> Listing {
+    let mut docs = Vec::new();
+    let mut skipped = Vec::new();
+    for r in results {
+        match r {
+            Ok(d) => docs.push(d),
+            Err(s) => skipped.push(s),
+        }
+    }
+    // Folders first, then documents, alphabetised within each group.
+    // This matches what `rr ls` users have grown used to and keeps
+    // output deterministic for golden tests.
+    docs.sort_by(|a, b| {
+        let ord = b.is_folder().cmp(&a.is_folder());
+        if ord != std::cmp::Ordering::Equal {
+            ord
+        } else {
+            a.visible_name
+                .to_lowercase()
+                .cmp(&b.visible_name.to_lowercase())
+        }
+    });
+    skipped.sort_by(|a, b| a.id.cmp(&b.id));
+    Listing { docs, skipped }
+}
+
 /// Minimal view of a `.metadata` blob — only the fields `rr ls` needs.
 /// Every field is optional because old documents on the cloud predate the
 /// current schema and may omit pieces.
@@ -1261,6 +1327,60 @@ mod tests {
         assert_eq!(diff.removed, vec!["bb:0:doc2:2:200".to_string()]);
         assert_eq!(diff.added, vec!["cc:0:doc9:1:10".to_string()]);
         assert!(!diff.order_preserved);
+    }
+
+    fn doc(id: &str, name: &str, doc_type: &str) -> DocumentInfo {
+        DocumentInfo {
+            id: id.into(),
+            visible_name: name.into(),
+            doc_type: doc_type.into(),
+            parent: None,
+            deleted: false,
+        }
+    }
+
+    fn skip(id: &str) -> SkippedEntry {
+        SkippedEntry {
+            id: id.into(),
+            error: "timeout".into(),
+        }
+    }
+
+    #[test]
+    fn partition_sorts_docs_and_keeps_every_skip() {
+        let results = vec![
+            Ok(doc("d2", "zeta", "DocumentType")),
+            Err(skip("s2")),
+            Ok(doc("f1", "Folder", "CollectionType")),
+            Err(skip("s1")),
+            Ok(doc("d1", "alpha", "DocumentType")),
+        ];
+        let listing = partition_listing(results);
+        let ids: Vec<&str> = listing.docs.iter().map(|d| d.id.as_str()).collect();
+        assert_eq!(ids, ["f1", "d1", "d2"]);
+        let skipped: Vec<&str> = listing.skipped.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(skipped, ["s1", "s2"]);
+    }
+
+    #[test]
+    fn incomplete_summary_names_every_skipped_id() {
+        let results = vec![
+            Ok(doc("d1", "alpha", "DocumentType")),
+            Err(skip("s1")),
+            Err(skip("s2")),
+        ];
+        let listing = partition_listing(results);
+        let summary = listing.incomplete_summary().expect("must be flagged");
+        assert!(summary.starts_with("INCOMPLETE: 2 of 3 root entries"));
+        assert!(summary.contains("s1"));
+        assert!(summary.contains("s2"));
+    }
+
+    #[test]
+    fn incomplete_summary_is_none_when_everything_was_read() {
+        let results = vec![Ok(doc("d1", "alpha", "DocumentType"))];
+        let listing = partition_listing(results);
+        assert!(listing.incomplete_summary().is_none());
     }
 }
 #[test]

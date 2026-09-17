@@ -730,13 +730,18 @@ async fn handle_ls(folders_only: bool) -> Result<()> {
     // 401 here for non-Connect tokens even with a perfectly valid bearer.
     let token = ensure_fresh_token().await?;
     let client = crate::sync_v3::SyncClient::new(token).context("build sync client")?;
-    let docs = client.list_documents().await.map_err(map_rr_err)?;
-    let docs: Vec<_> = docs
+    let listing = client.list_documents().await.map_err(map_rr_err)?;
+    // Entries whose metadata could not be read. They are reported below
+    // and make the command fail: a listing that silently omits an entry
+    // can read as data loss, or hide it.
+    let incomplete = listing.incomplete_summary();
+    let all_docs = listing.docs;
+    let docs: Vec<_> = all_docs
         .into_iter()
         .filter(|d| !d.deleted)
         .filter(|d| !folders_only || d.is_folder())
         .collect();
-    if docs.is_empty() {
+    if docs.is_empty() && incomplete.is_none() {
         println!("No files found.");
         return Ok(());
     }
@@ -757,6 +762,10 @@ async fn handle_ls(folders_only: bool) -> Result<()> {
     }
     println!();
     println!("Total: {} items", docs.len());
+    if let Some(summary) = incomplete {
+        println!("{summary}");
+        bail!("listing incomplete: rerun `rr ls`; do not treat an entry as missing yet");
+    }
     Ok(())
 }
 
