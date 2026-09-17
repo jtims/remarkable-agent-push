@@ -18,7 +18,7 @@ pipeline, and tighter guardrails for agent use.
 
 | Change | Finding addressed | Author |
 |---|---|---|
-| Index parser fails closed; server-supplied index lines are re-emitted byte-for-byte; entry-count invariant before the root swap; previous root hash printed as a rollback handle | The parser silently skipped any index line it could not read, then rewrote the account-wide root index without it, which would drop that document from the library on the next push | Jeremiah Tims |
+| Index parser fails closed; server-supplied index lines are re-emitted byte-for-byte; entry-count invariant before the root swap; previous root hash printed as a rollback handle; `rr push --dry-run` shows the exact root-index diff before anything is written | The parser silently skipped any index line it could not read, then rewrote the account-wide root index without it, which would drop that document from the library on the next push | Jeremiah Tims |
 | Plaintext `tokens.json` dump removed and cleaned up on `auth` and `logout`; `config.toml` written owner-only (0700 directory, 0600 file) | Long-lived device token left in a world-readable debug file that survived logout | Matthew Miller ([upstream PR #5](https://github.com/hiteshjoshi/remarkable_rust/pull/5), merged here) |
 | Markdown image embedding confined to the source directory, 10 MiB cap | Local file inclusion through the legacy upload path, reachable by injected markdown in an agent context | Matthew Miller (upstream PR #5) |
 | Signed-upload redirects require HTTPS and an allowlisted storage host | Document bytes were PUT to any host named in a redirect | Matthew Miller (upstream PR #5) |
@@ -249,7 +249,15 @@ rr push doc.md --title "Custom Title"    # override inferred title
 rr push doc.md --device paper-pro-move   # also: paper-pro (default), rm2
 rr push - --title "From stdin"           # read markdown from stdin
 rr push doc.md --parent <FOLDER_UUID>    # land inside a folder (ids: rr ls --folders)
+rr push doc.md --dry-run                 # show the root-index diff, upload nothing
 ```
+
+`--dry-run` fetches the current root index, builds the one a real push
+would upload (through the same code path), and prints the line-level
+difference: how many existing lines are kept byte for byte, which line
+would be added, and whether the order of existing lines is preserved. It
+exits non-zero if any existing line would be dropped. Run it before the
+first push to a library you care about.
 
 On success `rr push` also prints `previous root` and `previous gen`: the
 cloud root pointer as it stood before the push. Blobs are

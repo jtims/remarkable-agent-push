@@ -102,6 +102,9 @@ pub struct RootState {
     pub root_hash: String,
     pub generation: i64,
     pub entries: Vec<IndexEntry>,
+    /// The root index blob exactly as the server returned it. Kept so a
+    /// dry run can diff the rewritten index against the real one.
+    pub body: String,
 }
 
 /// Async client for the sync v3 endpoints.
@@ -177,6 +180,7 @@ impl SyncClient {
             root_hash: p.hash,
             generation: p.generation,
             entries,
+            body: String::from_utf8_lossy(&index_body).into_owned(),
         })
     }
 
@@ -470,15 +474,9 @@ impl SyncClient {
         // 2. PUT every blob with its rm-filename.
         let mut doc_entries: Vec<IndexEntry> = Vec::with_capacity(files.len());
         for f in &files {
-            let hash = sha256_hex(&f.bytes);
-            self.put_blob(&hash, &f.bytes, &f.cloud_name).await?;
-            doc_entries.push(IndexEntry {
-                hash,
-                id: f.cloud_name.clone(),
-                subfiles: 0,
-                size: f.bytes.len() as u64,
-                raw: None,
-            });
+            let entry = entry_for(f);
+            self.put_blob(&entry.hash, &f.bytes, &f.cloud_name).await?;
+            doc_entries.push(entry);
         }
 
         // 3. Up to a few retries on the root-generation race.
@@ -486,40 +484,15 @@ impl SyncClient {
         for attempt in 0..MAX_ATTEMPTS {
             let root = self.load_root().await?;
 
-            // Build the doc-index for our doc and PUT it.
-            let doc_body = serialize_index(root.schema, &doc_uuid, &doc_entries, false);
-            let doc_index_hash = hash_index(root.schema, &doc_entries, &doc_body)?;
+            // The whole index layer comes from `plan_root`, the same pure
+            // function the dry run uses, and is computed (invariant check
+            // included) before any of it is sent.
+            let planned = plan_root(&root, &doc_uuid, &doc_entries)?;
+            let (doc_body, root_body) = (planned.doc_body, planned.root_body);
+            let (doc_index_hash, new_root_hash) = (planned.doc_index_hash, planned.root_hash);
+
             self.put_blob(&doc_index_hash, &doc_body, &format!("{doc_uuid}.docSchema"))
                 .await?;
-
-            // Replace-or-append our doc into the root entries.
-            let total_size: u64 = doc_entries.iter().map(|e| e.size).sum();
-            let new_entry = IndexEntry {
-                hash: doc_index_hash.clone(),
-                id: doc_uuid.clone(),
-                subfiles: doc_entries.len() as u32,
-                size: total_size,
-                raw: None,
-            };
-            let new_root_entries = replace_or_append(root.entries.clone(), new_entry);
-
-            // Invariant: a push adds exactly one document, or replaces our
-            // own id on a retry. Any other count means the rewritten root
-            // would lose or duplicate entries, so stop before the swap.
-            let already_present = root.entries.iter().any(|e| e.id == doc_uuid);
-            let expected_len = root.entries.len() + usize::from(!already_present);
-            if new_root_entries.len() != expected_len {
-                return Err(Error::Other(format!(
-                    "root rewrite would change entry count {} -> {} (expected {}); aborted",
-                    root.entries.len(),
-                    new_root_entries.len(),
-                    expected_len
-                )));
-            }
-
-            // Serialize + hash + upload new root index.
-            let root_body = serialize_index(root.schema, ".", &new_root_entries, true);
-            let new_root_hash = hash_index(root.schema, &new_root_entries, &root_body)?;
             self.put_blob(&new_root_hash, &root_body, "root.docSchema")
                 .await?;
 
@@ -546,6 +519,161 @@ impl SyncClient {
             }
         }
         unreachable!()
+    }
+
+    /// Dry run of `upload_bundle`: fetch the current root (two GETs),
+    /// compute exactly what a push would upload, and report how the
+    /// rewritten root index differs from the real one. Sends nothing.
+    pub async fn plan_bundle(&self, bundle: &Bundle) -> Result<PushPlan> {
+        let doc_uuid = bundle.doc_uuid.to_string();
+        let files = bundle_files(bundle);
+        let doc_entries: Vec<IndexEntry> = files.iter().map(entry_for).collect();
+
+        let root = self.load_root().await?;
+        let planned = plan_root(&root, &doc_uuid, &doc_entries)?;
+        let new_body = String::from_utf8_lossy(&planned.root_body).into_owned();
+        Ok(PushPlan {
+            doc_id: doc_uuid,
+            blobs_to_upload: files.len() + 2,
+            previous_root_hash: root.root_hash.clone(),
+            previous_generation: root.generation,
+            new_root_hash: planned.root_hash,
+            diff: diff_root(root.schema, &root.body, &new_body),
+        })
+    }
+}
+
+/// Index-layer output of a push, computed without touching the network.
+/// `upload_bundle` and `plan_bundle` both get it from `plan_root`, so a dry
+/// run shows exactly what a real push would upload.
+struct NewRoot {
+    doc_body: Vec<u8>,
+    doc_index_hash: String,
+    root_body: Vec<u8>,
+    root_hash: String,
+}
+
+/// Build the document index and the rewritten root index for one new
+/// document. Pure: no I/O.
+fn plan_root(root: &RootState, doc_uuid: &str, doc_entries: &[IndexEntry]) -> Result<NewRoot> {
+    let doc_body = serialize_index(root.schema, doc_uuid, doc_entries, false);
+    let doc_index_hash = hash_index(root.schema, doc_entries, &doc_body)?;
+
+    let total_size: u64 = doc_entries.iter().map(|e| e.size).sum();
+    let new_entry = IndexEntry {
+        hash: doc_index_hash.clone(),
+        id: doc_uuid.to_string(),
+        subfiles: doc_entries.len() as u32,
+        size: total_size,
+        raw: None,
+    };
+    let entries = replace_or_append(root.entries.clone(), new_entry);
+
+    // Invariant: a push adds exactly one document, or replaces our own id
+    // on a retry. Any other count means the rewritten root would lose or
+    // duplicate entries, so stop before anything is sent.
+    let already_present = root.entries.iter().any(|e| e.id == doc_uuid);
+    let expected_len = root.entries.len() + usize::from(!already_present);
+    if entries.len() != expected_len {
+        return Err(Error::Other(format!(
+            "root rewrite would change entry count {} -> {} (expected {}); aborted",
+            root.entries.len(),
+            entries.len(),
+            expected_len
+        )));
+    }
+
+    let root_body = serialize_index(root.schema, ".", &entries, true);
+    let root_hash = hash_index(root.schema, &entries, &root_body)?;
+    Ok(NewRoot {
+        doc_body,
+        doc_index_hash,
+        root_body,
+        root_hash,
+    })
+}
+
+/// Index entry for one blob of a document: content hash, name and size.
+fn entry_for(f: &CloudFile) -> IndexEntry {
+    IndexEntry {
+        hash: sha256_hex(&f.bytes),
+        id: f.cloud_name.clone(),
+        subfiles: 0,
+        size: f.bytes.len() as u64,
+        raw: None,
+    }
+}
+
+/// What a push would do, as reported by `SyncClient::plan_bundle`.
+#[derive(Debug, Clone)]
+pub struct PushPlan {
+    pub doc_id: String,
+    /// Document blobs, plus the document index, plus the new root index.
+    pub blobs_to_upload: usize,
+    pub previous_root_hash: String,
+    pub previous_generation: i64,
+    pub new_root_hash: String,
+    pub diff: RootDiff,
+}
+
+/// Line-level comparison of the root index before and after a push.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootDiff {
+    pub old_totals: Option<String>,
+    pub new_totals: Option<String>,
+    pub old_entries: usize,
+    pub new_entries: usize,
+    /// Entry lines present before and missing after. Must be empty.
+    pub removed: Vec<String>,
+    /// Entry lines present after and not before. Exactly one for a push.
+    pub added: Vec<String>,
+    /// True when the new index, with `added` taken out, lists the old
+    /// entry lines in the same order, byte for byte.
+    pub order_preserved: bool,
+}
+
+fn is_totals_row(line: &str) -> bool {
+    let parts: Vec<&str> = line.split(':').collect();
+    parts.len() == 4 && parts[0] == "0"
+}
+
+/// Split an index body into its optional v4 totals row and its entry lines.
+fn split_index(schema: Schema, body: &str) -> (Option<String>, Vec<String>) {
+    let mut rest: Vec<String> = body
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .skip(1)
+        .map(str::to_owned)
+        .collect();
+    let mut totals = None;
+    if schema == Schema::V4 && rest.first().is_some_and(|l| is_totals_row(l)) {
+        totals = Some(rest.remove(0));
+    }
+    (totals, rest)
+}
+
+/// Lines of `a` that do not appear in `b`, in `a`'s order.
+fn lines_missing_from(a: &[String], b: &[String]) -> Vec<String> {
+    a.iter().filter(|l| !b.contains(*l)).cloned().collect()
+}
+
+fn diff_root(schema: Schema, old_body: &str, new_body: &str) -> RootDiff {
+    let (old_totals, old_lines) = split_index(schema, old_body);
+    let (new_totals, new_lines) = split_index(schema, new_body);
+
+    let removed = lines_missing_from(&old_lines, &new_lines);
+    let added = lines_missing_from(&new_lines, &old_lines);
+    let kept = lines_missing_from(&new_lines, &added);
+    let order_preserved = kept == old_lines;
+
+    RootDiff {
+        old_totals,
+        new_totals,
+        old_entries: old_lines.len(),
+        new_entries: new_lines.len(),
+        removed,
+        added,
+        order_preserved,
     }
 }
 
@@ -1025,6 +1153,67 @@ mod tests {
         assert!(out.contains("bb:deadbeef:doc2:2:200\n"));
         assert!(out.contains("cc:80000000:doc3:1:5\n"));
         assert_eq!(out.lines().count(), 4);
+    }
+
+    fn root_state_from(body: &str) -> RootState {
+        let (schema, entries) = parse_index(body.as_bytes()).unwrap();
+        RootState {
+            schema,
+            root_hash: "old".into(),
+            generation: 7,
+            entries,
+            body: body.to_string(),
+        }
+    }
+
+    fn one_blob_doc() -> Vec<IndexEntry> {
+        vec![IndexEntry {
+            hash: "ab".repeat(32),
+            id: "doc9.metadata".into(),
+            subfiles: 0,
+            size: 10,
+            raw: None,
+        }]
+    }
+
+    #[test]
+    fn dry_run_diff_shows_one_added_line_and_nothing_removed() {
+        let root = root_state_from("4\n0:.:2:300\naa:0:doc1:4:100\nbb:0:doc2:2:200\n");
+        let planned = plan_root(&root, "doc9", &one_blob_doc()).unwrap();
+        let new_body = String::from_utf8(planned.root_body).unwrap();
+        let diff = diff_root(root.schema, &root.body, &new_body);
+        assert!(diff.removed.is_empty());
+        assert_eq!(diff.added.len(), 1);
+        assert!(diff.added[0].contains(":doc9:"));
+        assert!(diff.order_preserved);
+        assert_eq!(diff.old_entries, 2);
+        assert_eq!(diff.new_entries, 3);
+        assert_eq!(diff.old_totals.as_deref(), Some("0:.:2:300"));
+        assert_eq!(diff.new_totals.as_deref(), Some("0:.:3:310"));
+    }
+
+    #[test]
+    fn dry_run_diff_flags_a_reordered_index() {
+        // The server lists zzz before aaa. serialize_index sorts by id, so
+        // the rewrite would reorder existing lines. Nothing is lost, but
+        // the dry run has to say so.
+        let root = root_state_from("3\nbb:80000000:zzz:2:200\naa:80000000:aaa:4:100\n");
+        let planned = plan_root(&root, "mmm", &one_blob_doc()).unwrap();
+        let new_body = String::from_utf8(planned.root_body).unwrap();
+        let diff = diff_root(root.schema, &root.body, &new_body);
+        assert!(diff.removed.is_empty());
+        assert_eq!(diff.added.len(), 1);
+        assert!(!diff.order_preserved);
+    }
+
+    #[test]
+    fn dry_run_diff_reports_a_dropped_line() {
+        let old = "4\n0:.:2:300\naa:0:doc1:4:100\nbb:0:doc2:2:200\n";
+        let new = "4\n0:.:2:210\naa:0:doc1:4:100\ncc:0:doc9:1:10\n";
+        let diff = diff_root(Schema::V4, old, new);
+        assert_eq!(diff.removed, vec!["bb:0:doc2:2:200".to_string()]);
+        assert_eq!(diff.added, vec!["cc:0:doc9:1:10".to_string()]);
+        assert!(!diff.order_preserved);
     }
 }
 #[test]

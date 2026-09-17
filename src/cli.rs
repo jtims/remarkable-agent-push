@@ -81,6 +81,11 @@ pub enum Command {
         /// in the v6 generator or in the cloud bundle layer.
         #[arg(long, value_name = "PATH")]
         rm: Option<PathBuf>,
+
+        /// Show what the push would change in the cloud root index and
+        /// upload nothing. Reads the current root (two GET requests).
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// (hidden) Legacy upload path that builds an EPUB locally and asks
@@ -232,7 +237,8 @@ async fn dispatch(command: Command) -> Result<()> {
             device,
             parent,
             rm,
-        } => handle_push(file, title, device, parent, rm).await,
+            dry_run,
+        } => handle_push(file, title, device, parent, rm, dry_run).await,
         Command::ConnectPush {
             file,
             title,
@@ -259,6 +265,7 @@ async fn handle_push(
     device: DeviceArg,
     parent: Option<String>,
     rm_override: Option<PathBuf>,
+    dry_run: bool,
 ) -> Result<()> {
     // Validate --parent up front, before any network work: folder ids are
     // UUIDs (see `rr ls --folders`); anything else would silently produce
@@ -346,6 +353,12 @@ async fn handle_push(
         total_bytes
     );
 
+    if dry_run {
+        let client = crate::sync_v3::SyncClient::new(token).context("build sync client")?;
+        let plan = client.plan_bundle(&bundle).await.context("plan bundle")?;
+        return report_push_plan(&plan);
+    }
+
     println!("Uploading via cloud sync v3...");
     let client = crate::sync_v3::SyncClient::new(token).context("build sync client")?;
     let result = client
@@ -361,6 +374,44 @@ async fn handle_push(
     // Rollback handle: the root pointer as it stood before this push.
     println!("  previous root: {}", result.previous_root_hash);
     println!("  previous gen:  {}", result.previous_generation);
+    Ok(())
+}
+
+/// Print a dry-run plan. Fails when the rewritten root would drop a line,
+/// so scripts and agents cannot mistake a lossy plan for a clean one.
+fn report_push_plan(plan: &crate::sync_v3::PushPlan) -> Result<()> {
+    let diff = &plan.diff;
+    println!("Dry run: nothing was uploaded.");
+    println!("  doc id:            {}", plan.doc_id);
+    println!("  blobs to upload:   {}", plan.blobs_to_upload);
+    println!("  current root:      {}", plan.previous_root_hash);
+    println!("  current gen:       {}", plan.previous_generation);
+    println!("  new root would be: {}", plan.new_root_hash);
+    println!("Root index diff:");
+    println!("  entry lines:       {} -> {}", diff.old_entries, diff.new_entries);
+    if let (Some(old), Some(new)) = (&diff.old_totals, &diff.new_totals) {
+        println!("  totals row:        {old} -> {new}");
+    }
+    println!("  lines removed:     {}", diff.removed.len());
+    for line in &diff.removed {
+        println!("    - {line}");
+    }
+    println!("  lines added:       {}", diff.added.len());
+    for line in &diff.added {
+        println!("    + {line}");
+    }
+    println!("  order preserved:   {}", diff.order_preserved);
+    if !diff.removed.is_empty() {
+        bail!("dry run: the rewritten root would drop existing index lines; do not push");
+    }
+    if diff.added.len() != 1 {
+        bail!("dry run: expected exactly one added index line");
+    }
+    if diff.order_preserved {
+        println!("{} every existing line is kept byte for byte, in order", "✓".green());
+    } else {
+        println!("{} no line is lost, but existing lines would be reordered", "!".yellow());
+    }
     Ok(())
 }
 
