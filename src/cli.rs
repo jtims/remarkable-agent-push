@@ -164,6 +164,11 @@ pub enum Command {
         target: String,
         #[arg(short, long)]
         dry_run: bool,
+        /// Replace an existing SKILL.md that differs from the bundled one.
+        /// Without this flag a differing file is left alone and the
+        /// command fails.
+        #[arg(long)]
+        force: bool,
     },
 
     /// List background jobs.
@@ -265,7 +270,11 @@ async fn dispatch(command: Command) -> Result<()> {
         Command::RootRestore { hash, yes } => handle_root_restore(hash, yes).await,
         Command::Status => handle_status().await,
         Command::Logout => handle_logout(),
-        Command::Skills { target, dry_run } => skills::install_skills(&target, dry_run),
+        Command::Skills {
+            target,
+            dry_run,
+            force,
+        } => skills::install_skills(&target, dry_run, force),
         Command::Jobs => handle_jobs(),
         Command::Logs { id } => handle_logs(&id),
         Command::Cancel { id } => handle_cancel(&id),
