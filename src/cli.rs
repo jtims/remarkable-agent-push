@@ -358,6 +358,9 @@ async fn handle_push(
         result.doc_id,
         result.new_generation
     );
+    // Rollback handle: the root pointer as it stood before this push.
+    println!("  previous root: {}", result.previous_root_hash);
+    println!("  previous gen:  {}", result.previous_generation);
     Ok(())
 }
 

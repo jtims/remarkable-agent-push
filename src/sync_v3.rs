@@ -89,6 +89,11 @@ pub struct IndexEntry {
     pub id: String,
     pub subfiles: u32,
     pub size: u64,
+    /// The exact line the server sent for this entry. Set only by
+    /// `parse_index`; `serialize_index` re-emits it byte-for-byte, so
+    /// rewriting an index never reinterprets an entry we did not create.
+    /// `None` for entries built locally.
+    pub raw: Option<String>,
 }
 
 #[derive(Debug)]
@@ -472,6 +477,7 @@ impl SyncClient {
                 id: f.cloud_name.clone(),
                 subfiles: 0,
                 size: f.bytes.len() as u64,
+                raw: None,
             });
         }
 
@@ -493,8 +499,23 @@ impl SyncClient {
                 id: doc_uuid.clone(),
                 subfiles: doc_entries.len() as u32,
                 size: total_size,
+                raw: None,
             };
             let new_root_entries = replace_or_append(root.entries.clone(), new_entry);
+
+            // Invariant: a push adds exactly one document, or replaces our
+            // own id on a retry. Any other count means the rewritten root
+            // would lose or duplicate entries, so stop before the swap.
+            let already_present = root.entries.iter().any(|e| e.id == doc_uuid);
+            let expected_len = root.entries.len() + usize::from(!already_present);
+            if new_root_entries.len() != expected_len {
+                return Err(Error::Other(format!(
+                    "root rewrite would change entry count {} -> {} (expected {}); aborted",
+                    root.entries.len(),
+                    new_root_entries.len(),
+                    expected_len
+                )));
+            }
 
             // Serialize + hash + upload new root index.
             let root_body = serialize_index(root.schema, ".", &new_root_entries, true);
@@ -510,6 +531,8 @@ impl SyncClient {
                         doc_index_hash,
                         new_root_hash,
                         new_generation,
+                        previous_root_hash: root.root_hash.clone(),
+                        previous_generation: root.generation,
                     });
                 }
                 UpdateRootOutcome::GenerationRace if attempt + 1 < MAX_ATTEMPTS => {
@@ -602,6 +625,11 @@ pub struct UploadResult {
     pub doc_index_hash: String,
     pub new_root_hash: String,
     pub new_generation: i64,
+    /// Root pointer as it stood immediately before this upload swapped it.
+    /// Blobs are content-addressed and never overwritten, so this hash is
+    /// the handle for restoring the prior library state.
+    pub previous_root_hash: String,
+    pub previous_generation: i64,
 }
 
 /// One file the cloud needs: bytes plus the friendly filename the server
@@ -689,20 +717,41 @@ fn parse_index(body: &[u8]) -> Result<(Schema, Vec<IndexEntry>)> {
         }
         first_after_schema = false;
 
-        let parts: Vec<&str> = line.split(':').collect();
-        if parts.len() < 5 {
-            continue;
-        }
-        let subfiles = parts[3].parse::<u32>().unwrap_or(0);
-        let size = parts[4].parse::<u64>().unwrap_or(0);
-        entries.push(IndexEntry {
-            hash: parts[0].to_string(),
-            id: parts[2].to_string(),
-            subfiles,
-            size,
-        });
+        entries.push(parse_entry_line(line)?);
     }
     Ok((schema, entries))
+}
+
+/// Parse one `<hash>:<type>:<id>:<subfiles>:<size>` line, failing closed.
+///
+/// The root index is rewritten from whatever `parse_index` returns, so a
+/// line we cannot fully read has to stop the operation. Skipping it would
+/// drop that document from the account-wide index on the next push, and
+/// paired devices act on the index.
+fn parse_entry_line(line: &str) -> Result<IndexEntry> {
+    let parts: Vec<&str> = line.split(':').collect();
+    if parts.len() != 5 || parts[0].is_empty() || parts[2].is_empty() {
+        return Err(bad_index_line(line));
+    }
+    let Ok(subfiles) = parts[3].parse::<u32>() else {
+        return Err(bad_index_line(line));
+    };
+    let Ok(size) = parts[4].parse::<u64>() else {
+        return Err(bad_index_line(line));
+    };
+    Ok(IndexEntry {
+        hash: parts[0].to_string(),
+        id: parts[2].to_string(),
+        subfiles,
+        size,
+        raw: Some(line.to_string()),
+    })
+}
+
+fn bad_index_line(line: &str) -> Error {
+    Error::InvalidResponse(format!(
+        "index line is not <hash>:<type>:<id>:<subfiles>:<size>; refusing to continue: {line:?}"
+    ))
 }
 
 /// Serialize an index blob. `label` is the docID for doc indexes or `"."`
@@ -728,6 +777,13 @@ fn serialize_index(schema: Schema, label: &str, entries: &[IndexEntry], is_root:
     };
 
     for e in sorted {
+        // Entries that came from the server go back out exactly as they
+        // arrived, including a type field this client has never seen.
+        if let Some(raw) = &e.raw {
+            out.push_str(raw);
+            out.push('\n');
+            continue;
+        }
         out.push_str(&format!(
             "{}:{}:{}:{}:{}\n",
             e.hash, type_field, e.id, e.subfiles, e.size
@@ -813,12 +869,14 @@ mod tests {
                 id: "z.rm".into(),
                 subfiles: 0,
                 size: 42,
+                raw: None,
             },
             IndexEntry {
                 hash: "cafebabe".repeat(8),
                 id: "a.rm".into(),
                 subfiles: 0,
                 size: 7,
+                raw: None,
             },
         ];
         let body = serialize_index(Schema::V4, "docid", &entries, false);
@@ -837,12 +895,14 @@ mod tests {
                 id: "1".into(),
                 subfiles: 0,
                 size: 1,
+                raw: None,
             },
             IndexEntry {
                 hash: "b".into(),
                 id: "2".into(),
                 subfiles: 0,
                 size: 2,
+                raw: None,
             },
         ];
         let updated = replace_or_append(
@@ -852,6 +912,7 @@ mod tests {
                 id: "2".into(),
                 subfiles: 0,
                 size: 99,
+                raw: None,
             },
         );
         assert_eq!(updated.len(), 2);
@@ -864,6 +925,7 @@ mod tests {
                 id: "3".into(),
                 subfiles: 0,
                 size: 3,
+                raw: None,
             },
         );
         assert_eq!(appended.len(), 3);
@@ -878,6 +940,7 @@ mod tests {
             id: "x".into(),
             subfiles: 0,
             size: 1,
+            raw: None,
         }];
         let got = hash_index(Schema::V4, &entries, body).unwrap();
         assert_eq!(got, sha256_hex(body));
@@ -893,12 +956,14 @@ mod tests {
                 id: "z".into(),
                 subfiles: 0,
                 size: 1,
+                raw: None,
             },
             IndexEntry {
                 hash: "bb".repeat(32),
                 id: "a".into(),
                 subfiles: 0,
                 size: 2,
+                raw: None,
             },
         ];
         // Expected: sha256(bytes("bb"*32) || bytes("aa"*32)) — sorted by id
@@ -924,6 +989,42 @@ mod tests {
         assert!(root_url().starts_with(SYNC_HOST));
         assert!(files_url("abc").starts_with(SYNC_HOST));
         assert!(files_url("abc").ends_with("/abc"));
+    }
+
+    #[test]
+    fn parse_rejects_line_with_missing_fields() {
+        // A short line used to be skipped silently, which dropped that
+        // document from the rewritten root. It must now stop the parse.
+        let body = b"4\n0:.:2:300\nabc:0:doc1:1:100\ndef:0:doc2\n";
+        assert!(parse_index(body).is_err());
+    }
+
+    #[test]
+    fn parse_rejects_non_numeric_counts() {
+        assert!(parse_index(b"3\nabc:80000000:doc1:one:100\n").is_err());
+        assert!(parse_index(b"3\nabc:80000000:doc1:1:big\n").is_err());
+    }
+
+    #[test]
+    fn root_rewrite_keeps_server_lines_byte_for_byte() {
+        // `deadbeef` stands in for an entry type this client has never seen.
+        let body = b"3\naa:80000000:doc1:4:100\nbb:deadbeef:doc2:2:200\n";
+        let (schema, entries) = parse_index(body).unwrap();
+        let added = replace_or_append(
+            entries,
+            IndexEntry {
+                hash: "cc".into(),
+                id: "doc3".into(),
+                subfiles: 1,
+                size: 5,
+                raw: None,
+            },
+        );
+        let out = String::from_utf8(serialize_index(schema, ".", &added, true)).unwrap();
+        assert!(out.contains("aa:80000000:doc1:4:100\n"));
+        assert!(out.contains("bb:deadbeef:doc2:2:200\n"));
+        assert!(out.contains("cc:80000000:doc3:1:5\n"));
+        assert_eq!(out.lines().count(), 4);
     }
 }
 #[test]
