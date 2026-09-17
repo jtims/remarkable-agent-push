@@ -288,11 +288,16 @@ fn split_on_hr(md: &str) -> Vec<String> {
 /// need distinguishing here). Character-wrapping (~50 chars/line) has no
 /// sourced value anywhere in rmscene/rmc/the Kaitai spec — still an
 /// unvalidated heuristic, not touched by this fix.
+///
+/// A blank source line costs nothing: `v6::markdown` drops every empty
+/// paragraph before rendering (`paragraphs.retain(|p| !p.text.is_empty())`),
+/// so it occupies no space on the device. Charging height for it pushed
+/// each table image down, away from the space reserved for it.
 fn line_height_estimate(line: &str) -> f32 {
     const HEADING: f32 = 150.0; // ParagraphStyle::Heading
     const PLAIN: f32 = 70.0; // ParagraphStyle::Plain / Bold
     const BULLET: f32 = 35.0; // ParagraphStyle::Bullet / Bullet2 / Checkbox*
-    const BLANK: f32 = 20.0; // no sourced value; unchanged pending evidence
+    const BLANK: f32 = 0.0; // the encoder drops empty paragraphs
 
     let t = line.trim();
     if t.is_empty() {
@@ -961,8 +966,33 @@ mod tests {
         assert_eq!(line_height_estimate("Plain paragraph text"), 70.0);
         assert_eq!(line_height_estimate("- Top-level bullet"), 35.0);
         assert_eq!(line_height_estimate("  - Nested bullet"), 35.0);
-        assert_eq!(line_height_estimate(""), 20.0);
-        assert_eq!(line_height_estimate("   "), 20.0);
+    }
+
+    #[test]
+    fn blank_lines_add_no_height() {
+        // The encoder drops every empty paragraph, so a blank source line
+        // occupies no space on the device. Charging height for it (20 per
+        // line, unsourced) pushed each table image down by that much.
+        assert_eq!(line_height_estimate(""), 0.0);
+        assert_eq!(line_height_estimate("   "), 0.0);
+        assert_eq!(line_height_estimate("\t"), 0.0);
+    }
+
+    #[test]
+    fn table_y_does_not_drift_with_extra_blank_lines() {
+        // The delimiter row must contain `---`: that is what
+        // strip_table_lines_with_heights recognises, and only then does
+        // the text-height path (the one under test) decide the y.
+        let tight = "# Title\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n";
+        let loose = "# Title\n\n\n\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n";
+        let a = PageInput::from_markdown(tight);
+        let b = PageInput::from_markdown(loose);
+        assert_eq!(a.images.len(), 1);
+        assert_eq!(b.images.len(), 1);
+        // 234 (anchor) + 150 (heading) + 80: above the 280 floor, so the
+        // text-height path decided it, not the fallback.
+        assert_eq!(a.images[0].y, 464.0);
+        assert_eq!(a.images[0].y, b.images[0].y);
     }
 
     #[test]
@@ -1165,7 +1195,7 @@ mod tests {
         assert_eq!(page.images.len(), 1);
         let y = page.images[0].y;
         // Expected: 234 (anchor) + 150 (heading, sourced from rmc's
-        // LINE_HEIGHTS) + 20 (blank line) + 80 = 484. Generous upper bound
+        // LINE_HEIGHTS) + 0 (blank line) + 80 = 464. Generous upper bound
         // below -- the point of this test is that trailing content (which
         // would push y well past 1000 under the old whole-document-estimate
         // bug) has no effect, not pinning the exact constant.
