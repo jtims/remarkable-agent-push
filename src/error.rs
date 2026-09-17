@@ -13,6 +13,13 @@ pub enum Error {
     #[error("authentication expired; run `rr auth` to re-pair")]
     AuthExpired,
 
+    /// HTTP 401 from the document API. Deliberately NOT `AuthExpired`:
+    /// callers check the stored expiry and refresh before every request,
+    /// so a 401 that still arrives usually means the endpoint refuses
+    /// this pairing, not that the token lapsed.
+    #[error("unauthorized (HTTP 401): {body}")]
+    Unauthorized { body: String },
+
     #[error("token refresh failed: {0}")]
     RefreshFailed(String),
 

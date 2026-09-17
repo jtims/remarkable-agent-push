@@ -368,8 +368,18 @@ async fn api_error(status: StatusCode, resp: reqwest::Response) -> Error {
         .and_then(|h| h.to_str().ok())
         .and_then(|s| s.parse::<u64>().ok());
     let body = resp.text().await.unwrap_or_default();
+    classify_status(status, retry_after, body)
+}
+
+/// Map an HTTP error status to an [`Error`]. Pure, so the mapping can be
+/// tested without a live response.
+///
+/// A 401 is not reported as an expired token: the CLI checks the stored
+/// expiry and refreshes before every request, so a 401 that still arrives
+/// usually means this endpoint refuses this pairing.
+fn classify_status(status: StatusCode, retry_after: Option<u64>, body: String) -> Error {
     match status {
-        StatusCode::UNAUTHORIZED => Error::AuthExpired,
+        StatusCode::UNAUTHORIZED => Error::Unauthorized { body },
         StatusCode::TOO_MANY_REQUESTS => Error::RateLimited {
             retry_after_secs: retry_after.unwrap_or(1),
         },
@@ -397,6 +407,24 @@ mod tests {
         assert_eq!(resolve_base_url(None), DEFAULT_BASE_URL);
         assert_eq!(resolve_base_url(Some("")), DEFAULT_BASE_URL);
         assert_eq!(resolve_base_url(Some("  ")), DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn classify_status_maps_401_to_unauthorized() {
+        let e = classify_status(StatusCode::UNAUTHORIZED, None, "nope".into());
+        let Error::Unauthorized { body } = e else {
+            panic!("a 401 must map to Unauthorized, never AuthExpired");
+        };
+        assert_eq!(body, "nope");
+    }
+
+    #[test]
+    fn classify_status_keeps_429_retry_after() {
+        let e = classify_status(StatusCode::TOO_MANY_REQUESTS, Some(7), String::new());
+        let Error::RateLimited { retry_after_secs } = e else {
+            panic!("a 429 must map to RateLimited");
+        };
+        assert_eq!(retry_after_secs, 7);
     }
 
     #[test]

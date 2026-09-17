@@ -959,8 +959,27 @@ fn handle_cancel(id: &str) -> Result<()> {
 fn map_rr_err(e: RrError) -> anyhow::Error {
     match e {
         RrError::AuthExpired => anyhow::anyhow!("token expired — run `rr auth` to re-pair"),
+        RrError::Unauthorized { .. } => anyhow::Error::msg(unauthorized_message()),
         other => anyhow::Error::from(other),
     }
+}
+
+/// Text shown for an HTTP 401 from the document API.
+///
+/// The token is checked for expiry, and refreshed if needed, before every
+/// request, so a 401 here usually means the endpoint refuses this pairing
+/// rather than that the token expired. It can still be a bad token, so
+/// the message sends the operator to `rr status` before `rr auth`.
+fn unauthorized_message() -> String {
+    let parts = [
+        "HTTP 401 from the document API.",
+        "The token passed the local expiry check before this call.",
+        "Run `rr status`: if it reports `Cloud: ok`, the pairing is fine,",
+        "this endpoint refuses it (folder create, delete and the legacy",
+        "pipeline), and pairing again will not help.",
+        "Only if `rr status` also fails is `rr auth` the next step.",
+    ];
+    parts.join(" ")
 }
 
 /// If we were spawned as a background job, register with the jobs subsystem
@@ -981,5 +1000,23 @@ mod tests {
         assert!(is_root_hash(&"a1".repeat(32)));
         assert!(!is_root_hash("abc"));
         assert!(!is_root_hash(&"zz".repeat(32)));
+    }
+
+    #[test]
+    fn unauthorized_message_points_to_status_first() {
+        let msg = unauthorized_message();
+        let status_at = msg.find("rr status").expect("names rr status");
+        let auth_at = msg.find("rr auth").expect("names rr auth");
+        assert!(status_at < auth_at);
+        assert!(!msg.contains("token expired"));
+    }
+
+    #[test]
+    fn unauthorized_error_maps_to_the_status_first_message() {
+        let err = RrError::Unauthorized {
+            body: String::from("refused by the endpoint"),
+        };
+        let mapped = map_rr_err(err);
+        assert_eq!(mapped.to_string(), unauthorized_message());
     }
 }
