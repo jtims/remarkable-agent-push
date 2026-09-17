@@ -252,6 +252,13 @@ rr push doc.md --parent <FOLDER_UUID>    # land inside a folder (ids: rr ls --fo
 rr push doc.md --dry-run                 # show the root-index diff, upload nothing
 ```
 
+`rr root-restore <hash>` rolls the root pointer back to an earlier root,
+such as the `previous root` a push printed. It is plan-only by default:
+it fetches the target index, refuses if that index does not parse, and
+prints which lines would disappear and which would return. Add `--yes`
+to perform it. The swap is guarded by the root generation, so a root that
+moved in the meantime is refused, not overwritten.
+
 `--dry-run` fetches the current root index, builds the one a real push
 would upload (through the same code path), and prints the line-level
 difference: how many existing lines are kept byte for byte, which line

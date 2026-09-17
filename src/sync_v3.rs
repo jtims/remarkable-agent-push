@@ -541,6 +541,39 @@ impl SyncClient {
             diff: diff_root(root.schema, &root.body, &new_body),
         })
     }
+
+    /// Plan a rollback of the root pointer to `target_hash`. Reads only:
+    /// the current root, and the target index blob, which must still exist
+    /// and must parse under the same fail-closed rules. Writes nothing.
+    pub async fn plan_restore(&self, target_hash: &str) -> Result<RestorePlan> {
+        let current = self.load_root().await?;
+        let target_body = self.get_blob(target_hash, "root.docSchema").await?;
+        let (target_schema, target_entries) = parse_index(&target_body)?;
+        let target_text = String::from_utf8_lossy(&target_body).into_owned();
+        Ok(RestorePlan {
+            current_root_hash: current.root_hash.clone(),
+            current_generation: current.generation,
+            current_entries: current.entries.len(),
+            target_root_hash: target_hash.to_string(),
+            target_entries: target_entries.len(),
+            schema_changed: target_schema != current.schema,
+            diff: diff_root(current.schema, &current.body, &target_text),
+        })
+    }
+
+    /// Point the root at the plan's target. Uses the same guarded swap as
+    /// a push: if the root moved after the plan was made, the server
+    /// answers 412 and nothing changes.
+    pub async fn apply_restore(&self, plan: &RestorePlan) -> Result<i64> {
+        let target = &plan.target_root_hash;
+        let outcome = self.update_root(target, plan.current_generation).await?;
+        if let UpdateRootOutcome::Updated { new_generation } = outcome {
+            return Ok(new_generation);
+        }
+        Err(Error::Other(
+            "root changed since the plan was made; re-run root-restore".into(),
+        ))
+    }
 }
 
 /// Index-layer output of a push, computed without touching the network.
@@ -613,6 +646,20 @@ pub struct PushPlan {
     pub previous_root_hash: String,
     pub previous_generation: i64,
     pub new_root_hash: String,
+    pub diff: RootDiff,
+}
+
+/// What `rr root-restore` would do, as reported by `plan_restore`.
+#[derive(Debug, Clone)]
+pub struct RestorePlan {
+    pub current_root_hash: String,
+    pub current_generation: i64,
+    pub current_entries: usize,
+    pub target_root_hash: String,
+    pub target_entries: usize,
+    pub schema_changed: bool,
+    /// Current index compared with the target: `removed` lines would
+    /// disappear from the library, `added` lines would come back.
     pub diff: RootDiff,
 }
 

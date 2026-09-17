@@ -140,6 +140,18 @@ pub enum Command {
         id: String,
     },
 
+    /// Roll the cloud root pointer back to an earlier root hash, such as
+    /// the `previous root` printed by `rr push`. Without --yes this only
+    /// shows what would change.
+    RootRestore {
+        /// Root hash to restore (64 hex characters).
+        hash: String,
+
+        /// Perform the restore. Without this flag nothing is written.
+        #[arg(long)]
+        yes: bool,
+    },
+
     /// Show authentication & cloud connectivity status.
     Status,
 
@@ -250,6 +262,7 @@ async fn dispatch(command: Command) -> Result<()> {
         Command::Ls { folders } => handle_ls(folders).await,
         Command::Mkdir { name, parent } => handle_mkdir(name, parent).await,
         Command::Rm { id } => handle_rm(id).await,
+        Command::RootRestore { hash, yes } => handle_root_restore(hash, yes).await,
         Command::Status => handle_status().await,
         Command::Logout => handle_logout(),
         Command::Skills { target, dry_run } => skills::install_skills(&target, dry_run),
@@ -778,6 +791,50 @@ async fn handle_rm(id: String) -> Result<()> {
     Ok(())
 }
 
+fn is_root_hash(s: &str) -> bool {
+    s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Plan, and with `--yes` perform, a rollback of the cloud root pointer.
+async fn handle_root_restore(hash: String, yes: bool) -> Result<()> {
+    let hash = hash.trim().to_ascii_lowercase();
+    if !is_root_hash(&hash) {
+        bail!("root hash must be 64 hex characters");
+    }
+    let token = ensure_fresh_token().await?;
+    let client = crate::sync_v3::SyncClient::new(token).context("build sync client")?;
+    let plan = client.plan_restore(&hash).await.map_err(map_rr_err)?;
+
+    println!("Root restore plan:");
+    println!("  current root:    {}", plan.current_root_hash);
+    println!("  current gen:     {}", plan.current_generation);
+    println!("  current entries: {}", plan.current_entries);
+    println!("  target root:     {}", plan.target_root_hash);
+    println!("  target entries:  {}", plan.target_entries);
+    println!("  lines removed:   {}", plan.diff.removed.len());
+    for line in &plan.diff.removed {
+        println!("    - {line}");
+    }
+    println!("  lines returned:  {}", plan.diff.added.len());
+    for line in &plan.diff.added {
+        println!("    + {line}");
+    }
+    if plan.schema_changed {
+        bail!("target root uses a different index schema; refusing to restore");
+    }
+    if plan.current_root_hash == plan.target_root_hash {
+        println!("Target is already the current root; nothing to do.");
+        return Ok(());
+    }
+    if !yes {
+        println!("Plan only: nothing was written. Re-run with --yes to restore.");
+        return Ok(());
+    }
+    let new_gen = client.apply_restore(&plan).await.map_err(map_rr_err)?;
+    println!("{} root restored (gen {})", "✓".green(), new_gen);
+    Ok(())
+}
+
 async fn handle_status() -> Result<()> {
     let mut cfg = Config::load()?;
     println!("rr {}", env!("CARGO_PKG_VERSION"));
@@ -913,4 +970,16 @@ fn map_rr_err(e: RrError) -> anyhow::Error {
 /// pathway. Kept as a hook for the next iteration.
 pub fn _background_lifecycle_marker() -> ExitCode {
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn root_hash_shape_is_checked() {
+        assert!(is_root_hash(&"a1".repeat(32)));
+        assert!(!is_root_hash("abc"));
+        assert!(!is_root_hash(&"zz".repeat(32)));
+    }
 }
