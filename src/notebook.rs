@@ -212,9 +212,34 @@ impl PageInput {
     }
 }
 
+/// Track fenced-code state across lines, CommonMark style: a fence opens
+/// on three or more backticks or tildes (indented at most three spaces)
+/// and closes on a line of the same character, at least as long, with
+/// nothing after it.
+fn next_fence_state(open: Option<(char, usize)>, line: &str) -> Option<(char, usize)> {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    let t = line.trim();
+    let Some(marker) = t.chars().next().filter(|c| matches!(*c, '`' | '~')) else {
+        return open;
+    };
+    let run = t.chars().take_while(|c| *c == marker).count();
+    if indent > 3 || run < 3 {
+        return open;
+    }
+    match open {
+        None => Some((marker, run)),
+        Some((m, n)) if m == marker && run >= n && t.len() == run => None,
+        still_open => still_open,
+    }
+}
+
 /// Split markdown source on `---` horizontal-rule lines. Each segment is
 /// returned trimmed; empty segments are dropped so consecutive HRs don't
 /// create blank pages.
+///
+/// A dash line inside a fenced code block is content, not a page break:
+/// splitting there cuts the fence in two, and everything after the
+/// orphaned opener is then treated as code and dropped.
 fn split_on_hr(md: &str) -> Vec<String> {
     let is_hr = |l: &str| {
         let t = l.trim();
@@ -222,8 +247,10 @@ fn split_on_hr(md: &str) -> Vec<String> {
     };
     let mut out = Vec::new();
     let mut buf = String::new();
+    let mut fence: Option<(char, usize)> = None;
     for line in md.lines() {
-        if is_hr(line) {
+        fence = next_fence_state(fence, line);
+        if fence.is_none() && is_hr(line) {
             if !buf.trim().is_empty() {
                 out.push(buf.trim().to_string());
             }
@@ -893,6 +920,32 @@ struct Layer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hr_inside_code_fence_does_not_split() {
+        let md = "# One\n\n```yaml\n---\nkey: v\n---\n```\n\nafter\n";
+        let pages = split_on_hr(md);
+        assert_eq!(pages.len(), 1);
+        assert!(pages[0].contains("key: v"));
+        assert!(pages[0].contains("after"));
+    }
+
+    #[test]
+    fn hr_after_fence_closes_still_splits() {
+        let md = "```\ncode\n```\n\n---\n\npage two\n";
+        let pages = split_on_hr(md);
+        assert_eq!(pages.len(), 2);
+        assert_eq!(pages[1], "page two");
+    }
+
+    #[test]
+    fn tilde_fence_needs_a_closer_at_least_as_long() {
+        let md = "~~~~\n---\n~~~\nstill code\n~~~~\n\n---\n\nlast\n";
+        let pages = split_on_hr(md);
+        assert_eq!(pages.len(), 2);
+        assert!(pages[0].contains("still code"));
+        assert_eq!(pages[1], "last");
+    }
 
     #[test]
     fn line_height_estimate_matches_sourced_paragraph_styles() {
