@@ -25,6 +25,8 @@ pipeline, and tighter guardrails for agent use.
 | Installer aborts without a verified SHA-256; no longer writes into agent configuration directories | Best-effort checksum; unrequested writes to `~/.claude`, `~/.opencode`, `~/.codex` | Matthew Miller (checksums, upstream PR #5); Jeremiah Tims (opt-in skills) |
 | Table images positioned from sourced line heights | Tables overlapped the following heading on the device | Matthew Miller ([upstream PR #6](https://github.com/hiteshjoshi/remarkable_rust/pull/6), merged here) |
 | GitHub Actions rebuilt: actions pinned to commit SHAs, read-only default token, tests gate the release build, native Intel macOS runner with a pinned deployment target | Upstream release workflow targeted a retired runner label and tag-pinned actions | Jeremiah Tims |
+| `rr root-restore <hash>`: a plan-only rollback of the root pointer to an earlier root; `--yes` performs it under the same generation guard as a push | The previous-root hash a push printed could not be acted on without handling the bearer token by hand | Jeremiah Tims |
+| `0.3.6-jt.4`: a document-API 401 is reported as a refusal that points to `rr status` first; `rr ls` reports entries it could not read and exits non-zero; `rr push` strips YAML frontmatter, strictly; `rr skills` refuses to overwrite a differing SKILL.md without `--force`; the page splitter ignores dash lines inside code fences; blank lines no longer inflate the table-position estimate | Every 401 was labeled "token expired"; a listing could silently omit entries; frontmatter landed as a stray first page; one command could replace a customized skill file; a fenced YAML example cut a page in two; uneven spacing around tables (fixed in part, the rest awaits on-device measurement) | Jeremiah Tims |
 
 Both upstream pull requests were unmerged upstream when they were merged
 here (2026-09-17); each diff was read line by line first. Audit and patch
@@ -49,8 +51,9 @@ the yellow-icon kind, not a PDF) shows up on your tablet.
 
 `rr` is a small Rust CLI that turns markdown into a native v6 reMarkable
 notebook locally and uploads it via the device's own cloud sync API.
-**Works on any reMarkable account — Connect subscription is not
-required.** Agents drive it through a SKILL file that `rr` installs for
+Upstream reports that it works on any reMarkable account, with or
+without a Connect subscription; this build has only been tested on an
+account with Connect active. Agents drive it through a SKILL file that `rr` installs for
 Claude, OpenCode, and Codex.
 
 ---
@@ -67,12 +70,17 @@ rr auth
 rr skills --target claude --dry-run     # preview
 rr skills --target claude               # install
 
-# 4. Restart the agent so it picks up the new skill, then just ask.
+# 4. Just ask. Restart the agent only if it does not see the new skill.
 ```
 
-If you skip the restart the agent won't know the skill exists and will
-default to its usual behaviour. Restart the agent process (close and
-reopen the CLI / app) and you're good.
+Claude Code watches its skills directory and normally picks a new skill
+up inside the running session. If the agent does not see it (another
+agent, or a skills directory that did not exist when the session
+started), restart the agent process: close and reopen the CLI / app.
+
+`rr skills` never replaces a SKILL.md that differs from the one it
+ships: it refuses and names both files. Pass `--force` only if you mean
+to overwrite your own edits.
 
 In Claude / OpenCode / Codex, things like:
 
@@ -84,7 +92,7 @@ In Claude / OpenCode / Codex, things like:
 The skill activates, the agent writes a clean markdown file, runs
 `rr push`, and reports the document id. You pick up the tablet and the
 document is already there, properly formatted, with real tables (more on
-that below), embedded images, and the title at the top.
+that below) and the title at the top.
 
 ### What the SKILL gets the agent to do
 
@@ -281,12 +289,17 @@ markdown into multiple pages with `---` horizontal-rule lines.
 ```bash
 rr ls                    # list documents in the cloud
 rr ls --folders          # only show folders
-rr mkdir "Work/2026"     # create a folder
-rr rm <doc-uuid>         # delete by id
+rr mkdir "Work/2026"     # create a folder   (see the note below)
+rr rm <doc-uuid>         # delete by id      (see the note below)
 ```
 
-All of these talk to the same sync v3 endpoints `push` uses, so they
-work on any reMarkable account — Connect not required.
+`rr ls` reads the same sync v3 endpoints `push` uses. `rr mkdir` and
+`rr rm` do not: they call the older document API (`/doc/v2/files`),
+which answered HTTP 401 when this build was tested against a paired
+Paper Pro account with Connect active (2026-09-17). Treat both as not
+working. Create folders and delete documents on the tablet or in the
+reMarkable app, and target an existing folder with `--parent`.
+Rebuilding both commands on sync v3 is planned.
 
 ### Legacy: EPUB → cloud convert
 
@@ -303,6 +316,7 @@ produces the same native notebook with no cloud-side conversion.
 rr skills --target all          # install SKILL.md into claude/opencode/codex
 rr skills --target claude       # one agent
 rr skills --dry-run --target all
+rr skills --target claude --force   # replace a SKILL.md that differs (refused otherwise)
 ```
 
 The SKILL files document the upload pipeline plus what renders well on
@@ -335,9 +349,10 @@ your.md
 
 The binary v6 format is the same one the device writes to its own
 filesystem, so the cloud has nothing to convert — it just stores and
-hands the blobs back to the tablet. That's why this path works without a
-Connect subscription: it's the same sync protocol every reMarkable
-device speaks to `internal.cloud.remarkable.com`.
+hands the blobs back to the tablet. That is why, according to upstream, this
+path works without a Connect subscription (not tested here): it's the
+same sync protocol every reMarkable device speaks to
+`internal.cloud.remarkable.com`.
 
 Some details:
 
@@ -357,11 +372,15 @@ what renders well on the device.
 
 - One-way. Local → cloud. No download path.
 - No update-in-place. Every push creates a new document; re-pushing the
-  same source makes a duplicate. Delete the old one first.
+  same source makes a duplicate. Delete the old one first, on the tablet
+  or in the reMarkable app.
 - Folder targeting is by id, not by name: `rr push --parent <FOLDER_UUID>`
   with ids from `rr ls --folders`.
-- `rr mkdir` and `rr rm` use the document API, which upstream source
-  comments report as requiring a Connect subscription.
+- `rr mkdir` and `rr rm` do not work in practice. They use the document
+  API, which upstream source comments describe as requiring a Connect
+  subscription and which returned HTTP 401 in testing even with one. From
+  `0.3.6-jt.4` that 401 is reported as a refusal that points to
+  `rr status`, not as an expired token.
 - No inline emphasis. The v6 typed-text engine on Paper Pro doesn't have
   inline bold/italic/code styling; the text arrives, just without the
   styling. Code blocks, images embedded in markdown, and footnotes are
@@ -379,10 +398,20 @@ Your reMarkable device and user tokens are stored locally at
 file 0600). The user token is also mirrored to the OS keychain on macOS
 and Windows. Nothing else holds credentials: the legacy `tokens.json`
 debug file is no longer written and is deleted on `rr auth` and
-`rr logout` if an older build left one behind. Pushes go directly to reMarkable's cloud sync API at
-`internal.cloud.remarkable.com` — the same endpoint every reMarkable
-device talks to. Nothing else is contacted. No analytics, no telemetry,
-no third-party services.
+`rr logout` if an older build left one behind.
+
+The binary contacts reMarkable hosts only:
+
+- `webapp-prod.cloud.remarkable.engineering`: pairing and token refresh.
+- `internal.cloud.remarkable.com`: sync v3, the endpoint every reMarkable
+  device talks to. Pushes, listings and the root pointer go here.
+- `web.<region>.tectonic.remarkable.com`: the regional document API used
+  by `mkdir`, `rm` and the legacy pipeline.
+- The storage host named in a signed-upload redirect, which must be HTTPS
+  and on an allowlist.
+
+No analytics, no telemetry, no third-party services. `install.sh` also
+contacts GitHub to download the release.
 
 ---
 
