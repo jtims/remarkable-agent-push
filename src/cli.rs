@@ -388,7 +388,10 @@ fn report_push_plan(plan: &crate::sync_v3::PushPlan) -> Result<()> {
     println!("  current gen:       {}", plan.previous_generation);
     println!("  new root would be: {}", plan.new_root_hash);
     println!("Root index diff:");
-    println!("  entry lines:       {} -> {}", diff.old_entries, diff.new_entries);
+    println!(
+        "  entry lines:       {} -> {}",
+        diff.old_entries, diff.new_entries
+    );
     if let (Some(old), Some(new)) = (&diff.old_totals, &diff.new_totals) {
         println!("  totals row:        {old} -> {new}");
     }
@@ -408,9 +411,15 @@ fn report_push_plan(plan: &crate::sync_v3::PushPlan) -> Result<()> {
         bail!("dry run: expected exactly one added index line");
     }
     if diff.order_preserved {
-        println!("{} every existing line is kept byte for byte, in order", "✓".green());
+        println!(
+            "{} every existing line is kept byte for byte, in order",
+            "✓".green()
+        );
     } else {
-        println!("{} no line is lost, but existing lines would be reordered", "!".yellow());
+        println!(
+            "{} no line is lost, but existing lines would be reordered",
+            "!".yellow()
+        );
     }
     Ok(())
 }
