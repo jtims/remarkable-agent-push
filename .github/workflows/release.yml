@@ -7,17 +7,21 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to release as (e.g. v0.2.0). Required when running manually."
+        description: "Tag to release as (e.g. v0.3.6-jt.1). Required when running manually."
         required: true
         type: string
 
+# Default to read-only; only the publish job is granted write access.
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
 
+# Third-party actions are pinned to full commit SHAs so a moved tag cannot
+# change what runs here. The trailing comment records the tag each SHA was
+# resolved from on 2026-09-17.
 jobs:
   build:
     name: build (${{ matrix.target }})
@@ -26,42 +30,35 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - target: aarch64-apple-darwin
-            runner: macos-latest        # Apple Silicon GHA runner
+          # Native Intel build. The upstream workflow used `macos-13`, a
+          # runner label GitHub no longer lists.
           - target: x86_64-apple-darwin
-            runner: macos-13            # Intel GHA runner — native, no cross-compile
-          - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-latest
-            apt: ""
-          - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-latest
-            apt: "gcc-aarch64-linux-gnu"
-            linker: aarch64-linux-gnu-gcc
-            cc: aarch64-linux-gnu-gcc
+            runner: macos-15-intel
+    env:
+      # Built on macOS 15, run on macOS 13: pin the floor explicitly rather
+      # than rely on the toolchain default.
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
 
       - name: Cache cargo registry + build
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: ${{ matrix.target }}
 
-      - name: Install cross-compile toolchain (Linux ARM64)
-        if: matrix.apt != ''
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ${{ matrix.apt }}
+      # The binary that ships is built from a tree whose tests just passed
+      # on the same runner.
+      - name: Test
+        run: cargo test --locked --all-targets
 
       - name: Build release binary
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.linker }}
-          CC_aarch64_unknown_linux_gnu: ${{ matrix.cc }}
         run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Package artifact
@@ -73,24 +70,18 @@ jobs:
           mkdir -p "$stage"
           cp "target/${{ matrix.target }}/release/rr" "$stage/"
           cp -r skills "$stage/"
-          cp README.md "$stage/" 2>/dev/null || true
-          cp docs/formatting-guide.md "$stage/" 2>/dev/null || true
+          cp README.md LICENSE "$stage/"
 
           archive="$stage.tar.gz"
           tar -czf "$archive" "$stage"
 
-          # SHA-256 for the installer to verify.
-          if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum "$archive" > "$archive.sha256"
-          else
-            shasum -a 256 "$archive" > "$archive.sha256"
-          fi
+          shasum -a 256 "$archive" > "$archive.sha256"
 
           echo "archive=$archive" >> "$GITHUB_OUTPUT"
           echo "checksum=$archive.sha256" >> "$GITHUB_OUTPUT"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: rr-${{ matrix.target }}
           path: |
@@ -103,20 +94,25 @@ jobs:
     name: publish
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Resolve tag
         id: tag
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "ref=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "ref=$INPUT_TAG" >> "$GITHUB_OUTPUT"
           else
             echo "ref=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: dist
           merge-multiple: true
@@ -132,7 +128,7 @@ jobs:
           ls -la
 
       - name: Publish GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ steps.tag.outputs.ref }}
           name: rr ${{ steps.tag.outputs.ref }}
