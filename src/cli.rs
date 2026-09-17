@@ -318,8 +318,8 @@ async fn handle_push(
         .context("missing token after refresh")?
         .to_owned();
 
-    // Read markdown source. Title falls back to H1, then filename, then a
-    // generic "Untitled".
+    // Read markdown source. Title order: `--title`, frontmatter `title`,
+    // first H1, filename, then a generic "Untitled".
     let md = if file.as_os_str() == "-" {
         use std::io::Read;
         let mut buf = String::new();
@@ -331,10 +331,20 @@ async fn handle_push(
         std::fs::read_to_string(&file).with_context(|| format!("read {}", file.display()))?
     };
 
-    let title = custom_title
-        .or_else(|| extract_h1_title(&md))
-        .or_else(|| file.file_stem().and_then(|s| s.to_str()).map(str::to_owned))
-        .unwrap_or_else(|| "Untitled".into());
+    // Files from a notes vault open with YAML frontmatter, and the page
+    // splitter would turn its dash lines into a stray first page. Strip
+    // it, strictly: a leading `---` that is not clearly frontmatter may
+    // be a deliberate page break, so it is left in place and reported.
+    let stripped = crate::markdown::strip_yaml_frontmatter(&md);
+    if stripped.ambiguous {
+        println!("  note: leading `---` is not YAML frontmatter; left in place");
+    } else if stripped.body.len() != md.len() {
+        println!("  stripped YAML frontmatter before building pages");
+    }
+    let frontmatter_title = stripped.title;
+    let md = stripped.body.to_owned();
+
+    let title = resolve_title(custom_title, frontmatter_title, &md, &file);
 
     println!("Building bundle '{}' for {:?}...", title, device);
     // Split on `---` horizontal rules to create multi-page notebooks.
@@ -444,6 +454,21 @@ fn report_push_plan(plan: &crate::sync_v3::PushPlan) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Title order: `--title`, frontmatter `title`, first H1, filename stem,
+/// then a generic "Untitled". `md` is the body with frontmatter removed.
+fn resolve_title(
+    custom: Option<String>,
+    frontmatter: Option<String>,
+    md: &str,
+    file: &std::path::Path,
+) -> String {
+    custom
+        .or(frontmatter)
+        .or_else(|| extract_h1_title(md))
+        .or_else(|| file.file_stem().and_then(|s| s.to_str()).map(str::to_owned))
+        .unwrap_or_else(|| "Untitled".into())
 }
 
 /// Pull the first markdown H1 as a title, if there is one.
@@ -1018,6 +1043,20 @@ mod tests {
         assert!(is_root_hash(&"a1".repeat(32)));
         assert!(!is_root_hash("abc"));
         assert!(!is_root_hash(&"zz".repeat(32)));
+    }
+
+    #[test]
+    fn title_order_is_flag_then_frontmatter_then_h1_then_filename() {
+        let file = std::path::Path::new("/tmp/My-Note_2026-09-17.md");
+        let md = "# Heading One\nbody\n";
+        let flag = resolve_title(Some("Flag".into()), Some("FM".into()), md, file);
+        assert_eq!(flag, "Flag");
+        let fm = resolve_title(None, Some("FM".into()), md, file);
+        assert_eq!(fm, "FM");
+        let h1 = resolve_title(None, None, md, file);
+        assert_eq!(h1, "Heading One");
+        let stem = resolve_title(None, None, "no heading\n", file);
+        assert_eq!(stem, "My-Note_2026-09-17");
     }
 
     #[test]

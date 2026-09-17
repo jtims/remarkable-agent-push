@@ -748,6 +748,131 @@ pub fn parse_frontmatter(content: &str) -> (HashMap<String, String>, String) {
     (metadata, remaining)
 }
 
+/// Result of [`strip_yaml_frontmatter`].
+#[derive(Debug, PartialEq, Eq)]
+pub struct Stripped<'a> {
+    /// The document without its frontmatter, or the whole input when
+    /// nothing was stripped.
+    pub body: &'a str,
+    /// `title:` from the frontmatter, when it had one.
+    pub title: Option<String>,
+    /// The document opens with `---` but the block was left in place
+    /// because it is not clearly YAML frontmatter.
+    pub ambiguous: bool,
+}
+
+impl<'a> Stripped<'a> {
+    fn untouched(content: &'a str, ambiguous: bool) -> Self {
+        Stripped {
+            body: content,
+            title: None,
+            ambiguous,
+        }
+    }
+}
+
+/// One line inside a candidate frontmatter block.
+enum FrontmatterLine<'a> {
+    /// `key: value`; the value may be empty.
+    Key(&'a str, &'a str),
+    /// Blank, a comment, a list item or an indented continuation.
+    Other,
+    /// Prose, so the block is not YAML frontmatter.
+    NotYaml,
+}
+
+/// Strip a leading YAML frontmatter block, strictly.
+///
+/// `rr push` splits pages on dash lines, so frontmatter left in place
+/// lands on the tablet as a stray first page. A leading `---` can also be
+/// a deliberate page break, so the block is removed only when all of
+/// these hold: line 1 is `---`; a closing `---` or `...` line exists; the
+/// block holds at least one `key: value` line; and no line in it is
+/// prose. Anything else is returned untouched and flagged `ambiguous`.
+///
+/// [`parse_frontmatter`] is lenient by comparison: it strips any closed
+/// block. It serves the legacy pipeline and is left as it was.
+pub fn strip_yaml_frontmatter(content: &str) -> Stripped<'_> {
+    let mut lines = content.split_inclusive('\n');
+    let Some(first) = lines.next() else {
+        return Stripped::untouched(content, false);
+    };
+    if first.trim_start_matches('\u{feff}').trim() != "---" {
+        return Stripped::untouched(content, false);
+    }
+
+    let mut consumed = first.len();
+    let mut title = None;
+    let mut saw_key = false;
+    let mut closed = false;
+    for line in lines {
+        consumed += line.len();
+        let t = line.trim();
+        if t == "---" || t == "..." {
+            closed = true;
+            break;
+        }
+        match classify_frontmatter_line(line) {
+            FrontmatterLine::Key(key, value) => {
+                saw_key = true;
+                if key == "title" && !value.is_empty() {
+                    title = Some(unquote(value).to_owned());
+                }
+            }
+            FrontmatterLine::Other => {}
+            FrontmatterLine::NotYaml => return Stripped::untouched(content, true),
+        }
+    }
+    if !closed || !saw_key {
+        return Stripped::untouched(content, true);
+    }
+
+    // `consumed` is a sum of whole-line lengths, so it is a char boundary.
+    let body = content[consumed..].trim_start_matches(['\n', '\r']);
+    Stripped {
+        body,
+        title,
+        ambiguous: false,
+    }
+}
+
+fn classify_frontmatter_line(line: &str) -> FrontmatterLine<'_> {
+    let t = line.trim();
+    if t.is_empty() || t.starts_with('#') || t.starts_with("- ") || t == "-" {
+        return FrontmatterLine::Other;
+    }
+    if line.starts_with(' ') || line.starts_with('\t') {
+        return FrontmatterLine::Other;
+    }
+    let Some((key, value)) = t.split_once(':') else {
+        return FrontmatterLine::NotYaml;
+    };
+    let value_ok = value.is_empty() || value.starts_with(' ');
+    if is_yaml_key(key) && value_ok {
+        FrontmatterLine::Key(key.trim(), value.trim())
+    } else {
+        FrontmatterLine::NotYaml
+    }
+}
+
+fn is_yaml_key(key: &str) -> bool {
+    !key.is_empty() && key.chars().all(is_yaml_key_char)
+}
+
+fn is_yaml_key_char(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, '_' | '-' | ' ' | '.')
+}
+
+fn unquote(value: &str) -> &str {
+    let v = value.trim();
+    for q in ['"', '\''] {
+        if v.len() >= 2 && v.starts_with(q) && v.ends_with(q) {
+            return &v[1..v.len() - 1];
+        }
+    }
+    v
+}
+
 fn newline_width_after(content: &str, idx: usize) -> usize {
     match content.as_bytes().get(idx) {
         Some(b'\r') if content.as_bytes().get(idx + 1) == Some(&b'\n') => 2,
@@ -886,5 +1011,58 @@ mod tests {
         let rendered = render_markdown(&markdown, Some(tmp.path()));
         assert!(rendered.assets.is_empty());
         assert!(rendered.xhtml.contains("[image: secret]"));
+    }
+
+    #[test]
+    fn strict_strip_removes_vault_style_frontmatter() {
+        let src = "---\ntitle: \"My Note\"\ntags:\n  - a\n  - b\n---\n\n# Heading\nbody\n";
+        let s = strip_yaml_frontmatter(src);
+        assert!(!s.ambiguous);
+        assert_eq!(s.title.as_deref(), Some("My Note"));
+        assert_eq!(s.body, "# Heading\nbody\n");
+    }
+
+    #[test]
+    fn strict_strip_keeps_a_leading_page_break_block() {
+        let src = "---\nJust some prose on the first page.\n---\n# Two\n";
+        let s = strip_yaml_frontmatter(src);
+        assert!(s.ambiguous);
+        assert_eq!(s.body, src);
+        assert_eq!(s.title, None);
+    }
+
+    #[test]
+    fn strict_strip_rejects_a_block_that_mixes_keys_and_prose() {
+        let src = "---\nNote: remember this\nAnd a sentence of prose.\n---\nrest\n";
+        let s = strip_yaml_frontmatter(src);
+        assert!(s.ambiguous);
+        assert_eq!(s.body, src);
+    }
+
+    #[test]
+    fn strict_strip_leaves_an_unclosed_block_alone() {
+        let src = "---\ntitle: x\nstatus: y\n";
+        let s = strip_yaml_frontmatter(src);
+        assert!(s.ambiguous);
+        assert_eq!(s.body, src);
+        assert_eq!(s.title, None);
+    }
+
+    #[test]
+    fn strict_strip_ignores_documents_without_frontmatter() {
+        let src = "# Title\n\n---\n\npage two\n";
+        let s = strip_yaml_frontmatter(src);
+        assert!(!s.ambiguous);
+        assert_eq!(s.body, src);
+        assert_eq!(s.title, None);
+    }
+
+    #[test]
+    fn strict_strip_handles_crlf_and_a_bom() {
+        let src = "\u{feff}---\r\ntitle: T\r\n---\r\nbody\r\n";
+        let s = strip_yaml_frontmatter(src);
+        assert!(!s.ambiguous);
+        assert_eq!(s.title.as_deref(), Some("T"));
+        assert_eq!(s.body, "body\r\n");
     }
 }
