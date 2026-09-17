@@ -2,9 +2,9 @@
 set -euo pipefail
 
 # rr installer - downloads pre-built binaries from GitHub releases
-# Usage: curl -fsSL https://raw.githubusercontent.com/hiteshjoshi/remarkable_rust/main/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/jtims/remarkable-agent-push/main/install.sh | bash
 
-REPO="hiteshjoshi/remarkable_rust"
+REPO="jtims/remarkable-agent-push"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 
 # Colors
@@ -185,10 +185,11 @@ main() {
             cp -r "$skills_source" "$skills_dest"
         fi
         
-        # Install agent skills
+        # Agent skills are opt-in: the installer never writes into an
+        # agent's configuration directory on its own.
         if [ -d "$skills_dest" ]; then
-            info "Installing agent skills..."
-            "$binary_dest" skills --target all || warn "Skills installation failed, but binary is installed"
+            info "Agent skills were NOT installed automatically."
+            info "Preview: $binary_dest skills --target claude --dry-run"
         fi
         
         local version="dev"
@@ -244,10 +245,11 @@ main() {
             cp -r "$skills_source" "$skills_dest"
         fi
         
-        # Install agent skills
+        # Agent skills are opt-in: the installer never writes into an
+        # agent's configuration directory on its own.
         if [ -d "$skills_dest" ]; then
-            info "Installing agent skills..."
-            "$binary_dest" skills --target all || warn "Skills installation failed, but binary is installed"
+            info "Agent skills were NOT installed automatically."
+            info "Preview: $binary_dest skills --target claude --dry-run"
         fi
         
         # Cleanup
