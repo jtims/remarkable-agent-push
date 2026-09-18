@@ -347,20 +347,24 @@ fn strip_table_lines_with_heights(md: &str, reserved_heights: &[f32]) -> (String
     let mut running_height: f32 = 0.0;
     let mut table_idx = 0;
     let mut i = 0;
-    let is_delim = |line: &str| {
-        let t = line.trim();
-        t.contains('|')
-            && t.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '))
-            && t.contains("---")
-    };
+    let mut fence: Option<(char, usize)> = None;
     let looks_like_row = |line: &str| {
         let t = line.trim();
         !t.is_empty() && t.starts_with('|') && t.ends_with('|')
     };
     while i < lines.len() {
+        // Fenced-code state, tracked as `split_on_hr` tracks it. Inside a
+        // fence a pipe row over a dash row is content: the parser makes no
+        // image for it, so stripping it would delete text and spend the
+        // next table's reserved height on a table that was never drawn.
+        fence = next_fence_state(fence, lines[i]);
         // A table appears as: header line (with pipes), delim line, then
         // zero or more data rows. Detect by peeking the next line.
-        if i + 1 < lines.len() && lines[i].contains('|') && is_delim(lines[i + 1]) {
+        if fence.is_none()
+            && i + 1 < lines.len()
+            && lines[i].contains('|')
+            && is_delimiter_row(lines[i + 1])
+        {
             // This table starts after `running_height` of preceding text.
             heights.push(running_height);
             // Skip the header + delim + every following table-shaped row.
@@ -393,6 +397,29 @@ fn strip_table_lines_with_heights(md: &str, reserved_heights: &[f32]) -> (String
         i += 1;
     }
     (out, heights)
+}
+
+/// A GFM table delimiter row: every cell is one or more dashes, with an
+/// optional colon at either end, which is the rule the markdown parser
+/// that rasterizes the tables applies to that row. The old test asked
+/// for three dashes somewhere in the row: a `| - | - |` table was then
+/// drawn as an image while its source rows stayed in the text, and
+/// every later table took an earlier table's position (F16).
+fn is_delimiter_row(line: &str) -> bool {
+    let t = line.trim();
+    if !t.contains('|') {
+        return false;
+    }
+    let inner = t.strip_prefix('|').unwrap_or(t);
+    let inner = inner.strip_suffix('|').unwrap_or(inner);
+    inner.split('|').all(is_delimiter_cell)
+}
+
+fn is_delimiter_cell(cell: &str) -> bool {
+    let c = cell.trim();
+    let c = c.strip_prefix(':').unwrap_or(c);
+    let c = c.strip_suffix(':').unwrap_or(c);
+    !c.is_empty() && c.chars().all(|ch| ch == '-')
 }
 
 /// Parse the 8-byte PNG signature + 13-byte IHDR chunk to extract width
@@ -980,9 +1007,9 @@ mod tests {
 
     #[test]
     fn table_y_does_not_drift_with_extra_blank_lines() {
-        // The delimiter row must contain `---`: that is what
-        // strip_table_lines_with_heights recognises, and only then does
-        // the text-height path (the one under test) decide the y.
+        // The table must be one strip_table_lines_with_heights recognises:
+        // only then does the text-height path (the one under test) decide
+        // the y. Since F16 that is any GFM delimiter row.
         let tight = "# Title\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n";
         let loose = "# Title\n\n\n\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n";
         let a = PageInput::from_markdown(tight);
@@ -993,6 +1020,59 @@ mod tests {
         // text-height path decided it, not the fallback.
         assert_eq!(a.images[0].y, 464.0);
         assert_eq!(a.images[0].y, b.images[0].y);
+    }
+
+    #[test]
+    fn delimiter_row_follows_the_gfm_rule() {
+        for row in ["| - | - |", "|:-:|-:|", "--- | ---"] {
+            assert!(is_delimiter_row(row), "should accept {row:?}");
+        }
+        for row in ["---", "| a | b |", "| - - |", "||", "| : |"] {
+            assert!(!is_delimiter_row(row), "should reject {row:?}");
+        }
+    }
+
+    #[test]
+    fn one_dash_delimiter_table_is_stripped_and_placed_by_its_text() {
+        // F16. Before the fix the image was made, but the pipe rows stayed
+        // in the text and y fell back to 314 (234 + 0 + 80).
+        let md = "# Title\n\n| A | B |\n| - | - |\n| 1 | 2 |\n";
+        let page = PageInput::from_markdown(md);
+        let text = &page.markdown;
+        assert_eq!(page.images.len(), 1);
+        assert!(!text.contains("| A"), "{text:?}");
+        assert!(!text.contains("| 1"), "{text:?}");
+        assert_eq!(page.images[0].y, 464.0);
+    }
+
+    #[test]
+    fn mixed_delimiter_forms_keep_each_table_on_its_own_height() {
+        // F16, second consequence: a table the stripper missed shifted
+        // every later table onto an earlier table's text height.
+        let md = "# Title\n\n| A | B |\n| - | - |\n| 1 | 2 |\n\n\
+                  Some text.\n\n| C | D |\n| --- | --- |\n| 3 | 4 |\n";
+        let page = PageInput::from_markdown(md);
+        let text = &page.markdown;
+        assert_eq!(page.images.len(), 2);
+        let first = &page.images[0];
+        assert_eq!(first.y, 464.0);
+        assert!(page.images[1].y > first.y + first.h);
+        assert!(!text.contains('|'), "{text:?}");
+    }
+
+    #[test]
+    fn a_table_inside_a_code_fence_is_not_stripped() {
+        // The parser makes no image for rows inside a fence, so stripping
+        // them would delete text and spend the real table's reserved
+        // height on a table that was never drawn.
+        let md = "# T\n\n```text\n| a | b |\n| - | - |\n```\n\n\
+                  | C | D |\n| --- | --- |\n| 3 | 4 |\n";
+        let page = PageInput::from_markdown(md);
+        let text = &page.markdown;
+        assert_eq!(page.images.len(), 1);
+        assert!(text.contains("| a | b |"), "{text:?}");
+        assert!(text.contains("| - | - |"), "{text:?}");
+        assert!(!text.contains("| C"), "{text:?}");
     }
 
     #[test]
