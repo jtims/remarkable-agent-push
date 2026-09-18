@@ -43,6 +43,9 @@ use sha2::{Digest, Sha256};
 use crate::error::{Error, Result};
 use crate::notebook::Bundle;
 
+mod inspect;
+pub use inspect::{InspectedBlob, Inspection};
+
 const SYNC_HOST: &str = "https://internal.cloud.remarkable.com";
 const SIGNED_UPLOAD_HOST_SUFFIXES: &[&str] = &[".googleapis.com", ".amazonaws.com"];
 

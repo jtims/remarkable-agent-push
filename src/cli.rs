@@ -140,6 +140,18 @@ pub enum Command {
         id: String,
     },
 
+    /// Show how one document or folder is stored in the cloud: its line in
+    /// the root index, its own index, and its metadata and content JSON.
+    /// Read-only: it only downloads.
+    Inspect {
+        /// The document or folder id (from `rr ls`).
+        id: String,
+
+        /// Read from this older root hash instead of the current root.
+        #[arg(long, value_name = "ROOT_HASH")]
+        root: Option<String>,
+    },
+
     /// Roll the cloud root pointer back to an earlier root hash, such as
     /// the `previous root` printed by `rr push`. Without --yes this only
     /// shows what would change.
@@ -267,6 +279,7 @@ async fn dispatch(command: Command) -> Result<()> {
         Command::Ls { folders } => handle_ls(folders).await,
         Command::Mkdir { name, parent } => handle_mkdir(name, parent).await,
         Command::Rm { id } => handle_rm(id).await,
+        Command::Inspect { id, root } => handle_inspect(id, root).await,
         Command::RootRestore { hash, yes } => handle_root_restore(hash, yes).await,
         Command::Status => handle_status().await,
         Command::Logout => handle_logout(),
@@ -831,6 +844,41 @@ async fn handle_rm(id: String) -> Result<()> {
         .await
         .map_err(map_rr_err)?;
     println!("{} Deleted '{}' ({})", "✓".green(), target.file_name, id);
+    Ok(())
+}
+
+/// Print how one item is stored in the cloud. Downloads only; the client
+/// method lives in `sync_v3::inspect`, which has no write call.
+async fn handle_inspect(id: String, root: Option<String>) -> Result<()> {
+    let id = id.trim();
+    let root = root.map(|h| h.trim().to_ascii_lowercase());
+    let bad_root = root.as_deref().is_some_and(|h| !is_root_hash(h));
+    if bad_root {
+        bail!("root hash must be 64 hex characters");
+    }
+    let token = ensure_fresh_token().await?;
+    let client = crate::sync_v3::SyncClient::new(token).context("build sync client")?;
+    let fetched = client.inspect(id, root.as_deref()).await;
+    let report = fetched.map_err(map_rr_err)?;
+
+    let root_state = match report.generation {
+        Some(g) => format!("current, gen {g}"),
+        None => "older root named with --root".to_string(),
+    };
+    println!("Inspect {id}");
+    println!("  root:         {}", report.root_hash);
+    println!("  root state:   {root_state}");
+    println!("  root entries: {}", report.root_entries);
+    println!("  root line:    {}", report.root_line);
+    println!("  item index:   {}", report.doc_index_hash);
+    for line in report.doc_index_body.lines() {
+        println!("    {line}");
+    }
+    for blob in &report.blobs {
+        println!("  {} ({}):", blob.name, blob.hash);
+        println!("{}", blob.body);
+    }
+    println!("Read-only: nothing was written.");
     Ok(())
 }
 

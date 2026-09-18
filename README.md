@@ -295,6 +295,7 @@ markdown into multiple pages with `---` horizontal-rule lines.
 ```bash
 rr ls                    # list documents in the cloud
 rr ls --folders          # only show folders
+rr inspect <id>          # how one item is stored (read-only; see below)
 rr mkdir "Work/2026"     # create a folder   (see the note below)
 rr rm <doc-uuid>         # delete by id      (see the note below)
 ```
@@ -306,6 +307,12 @@ Paper Pro account with Connect active (2026-09-17). Treat both as not
 working. Create folders and delete documents on the tablet or in the
 reMarkable app, and target an existing folder with `--parent`.
 Rebuilding both commands on sync v3 is planned.
+
+`rr inspect <id>` prints how one document or folder is stored: its line
+in the root index, its own index, and its `.metadata` and `.content`
+JSON. `--root <hash>` reads the same from an older root, for a before
+and after comparison. It only downloads, and it prints names and
+metadata from your library to your terminal.
 
 ### Legacy: EPUB → cloud convert
 
