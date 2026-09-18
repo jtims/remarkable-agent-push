@@ -27,12 +27,14 @@ pipeline, and tighter guardrails for agent use.
 | GitHub Actions rebuilt: actions pinned to commit SHAs, read-only default token, tests gate the release build, native Intel macOS runner with a pinned deployment target | Upstream release workflow targeted a retired runner label and tag-pinned actions | Jeremiah Tims |
 | `rr root-restore <hash>`: a plan-only rollback of the root pointer to an earlier root; `--yes` performs it under the same generation guard as a push | The previous-root hash a push printed could not be acted on without handling the bearer token by hand | Jeremiah Tims |
 | `0.3.6-jt.4`: a document-API 401 is reported as a refusal that points to `rr status` first; `rr ls` reports entries it could not read and exits non-zero; `rr push` strips YAML frontmatter, strictly; `rr skills` refuses to overwrite a differing SKILL.md without `--force`; the page splitter ignores dash lines inside code fences; blank lines no longer inflate the table-position estimate | Every 401 was labeled "token expired"; a listing could silently omit entries; frontmatter landed as a stray first page; one command could replace a customized skill file; a fenced YAML example cut a page in two; uneven spacing around tables (fixed in part, the rest awaits on-device measurement) | Jeremiah Tims |
+| `0.3.6-jt.5`: table images are drawn in the space reserved for them (heading height, paragraph wrapping and the image offset re-measured on a Paper Pro); the table stripper follows the GFM delimiter rule and skips code fences; the text frame starts higher on the page; `rr inspect <id>` shows, read-only, how one item is stored | A table's image sat at the end of its reserved space or past it, so the text after a table ran beside it or above it; a `\| - \| - \|` table was drawn while its source rows stayed on the page, and shifted every later table; the top margin was wider than the page needs; nothing could show how a folder or a trashed item is stored before `mkdir` and `rm` are rebuilt | Jeremiah Tims |
 
-Finding codes: commit and tag messages cite the six `0.3.6-jt.4` fixes as
-`F10` to `F15`, the numbers they carry in the source audit behind this
-build. In the order of the last row above: `F10` the 401 message, `F11`
-`rr ls`, `F13` frontmatter, `F14` `rr skills`, `F15` the page splitter,
-`F12` table spacing (fixed in part).
+Finding codes: commit and tag messages cite fixes as `F10` to `F16`, the
+numbers they carry in the source audit behind this build. In the order
+of the `0.3.6-jt.4` row above: `F10` the 401 message, `F11` `rr ls`,
+`F13` frontmatter, `F14` `rr skills`, `F15` the page splitter, `F12`
+table spacing (step 1). In `0.3.6-jt.5`: `F12` step 2 is the
+re-measured table placement, and `F16` is the delimiter rule.
 
 Both upstream pull requests were unmerged upstream when they were merged
 here (2026-09-17); each diff was read line by line first. Audit and patch
