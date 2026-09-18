@@ -184,14 +184,15 @@ impl PageInput {
             strip_table_lines_with_heights(&original, &reserved_heights);
 
         let mut images = Vec::new();
-        let mut y_cursor: f32 = 280.0;
+        let mut y_cursor: f32 = TABLE_MIN_Y;
         for (idx, r) in rendered.into_iter().enumerate() {
             let Some(r) = r else { continue };
             // This table's own position, from the text-height (including
             // reserved gaps for any earlier tables) accumulated before it
             // in the source...
             let height_before = table_text_heights.get(idx).copied().unwrap_or(0.0);
-            let text_based_y = (234.0 + height_before + TABLE_TOP_MARGIN).max(280.0);
+            let from_text = TEXT_TOP + height_before + TABLE_TOP_MARGIN;
+            let text_based_y = from_text.max(TABLE_MIN_Y);
             // ...but never above the bottom of the previous table's image,
             // as a safety net on top of the reserved-space accounting above.
             let y = text_based_y.max(y_cursor);
@@ -333,6 +334,14 @@ fn line_height_estimate(line: &str) -> f32 {
 /// together with the heading over-count, put the image at the very end
 /// of its block or past it (F12, measured 2026-09-18).
 const TABLE_TOP_MARGIN: f32 = 20.0;
+
+/// Where the text flow starts, as f32 for the image arithmetic. One
+/// source of truth with the text frame the writer emits.
+const TEXT_TOP: f32 = crate::v6::page::TEXT_TOP as f32;
+
+/// No table image starts above this. It keeps the distance the old floor
+/// had from the old text top (280 against 234).
+const TABLE_MIN_Y: f32 = TEXT_TOP + 46.0;
 
 /// Remove GFM table source lines from a markdown string so the typed-text
 /// path doesn't render them as literal pipe-separated text; replace each
@@ -1035,9 +1044,9 @@ mod tests {
         let b = PageInput::from_markdown(loose);
         assert_eq!(a.images.len(), 1);
         assert_eq!(b.images.len(), 1);
-        // 234 (anchor) + 88 (heading) + 20 (top margin): above the 280
+        // 120 (text top) + 88 (heading) + 20 (top margin): above the 166
         // floor, so the text-height path decided it, not the fallback.
-        assert_eq!(a.images[0].y, 342.0);
+        assert_eq!(a.images[0].y, 228.0);
         assert_eq!(a.images[0].y, b.images[0].y);
     }
 
@@ -1064,14 +1073,14 @@ mod tests {
         }
         two.push_str(table);
         let page_two = PageInput::from_markdown(&two);
-        // 234 + 88 + 5 * 70 + 20
-        assert_eq!(page_two.images[0].y, 692.0);
+        // 120 + 88 + 5 * 70 + 20
+        assert_eq!(page_two.images[0].y, 578.0);
 
         let long = "x".repeat(120);
         let three = format!("## Page three\n\n{long}\n\n{table}");
         let page_three = PageInput::from_markdown(&three);
-        // 234 + 88 + (70 + 46) + 20
-        assert_eq!(page_three.images[0].y, 458.0);
+        // 120 + 88 + (70 + 46) + 20
+        assert_eq!(page_three.images[0].y, 344.0);
     }
 
     #[test]
@@ -1094,7 +1103,7 @@ mod tests {
         assert_eq!(page.images.len(), 1);
         assert!(!text.contains("| A"), "{text:?}");
         assert!(!text.contains("| 1"), "{text:?}");
-        assert_eq!(page.images[0].y, 342.0);
+        assert_eq!(page.images[0].y, 228.0);
     }
 
     #[test]
@@ -1107,7 +1116,7 @@ mod tests {
         let text = &page.markdown;
         assert_eq!(page.images.len(), 2);
         let first = &page.images[0];
-        assert_eq!(first.y, 342.0);
+        assert_eq!(first.y, 228.0);
         assert!(page.images[1].y > first.y + first.h);
         assert!(!text.contains('|'), "{text:?}");
     }
@@ -1326,8 +1335,8 @@ mod tests {
         let page = PageInput::from_markdown(&md);
         assert_eq!(page.images.len(), 1);
         let y = page.images[0].y;
-        // Expected: 234 (anchor) + 88 (heading, measured) + 0 (blank
-        // line) + 20 (top margin) = 342. Generous upper bound
+        // Expected: 120 (text top) + 88 (heading, measured) + 0 (blank
+        // line) + 20 (top margin) = 228. Generous upper bound
         // below -- the point of this test is that trailing content (which
         // would push y well past 1000 under the old whole-document-estimate
         // bug) has no effect, not pinning the exact constant.

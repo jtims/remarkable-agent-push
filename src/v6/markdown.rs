@@ -35,11 +35,12 @@ use super::blocks::{ParagraphStyle, RootTextBlock, TextItem, TextItemValue};
 use super::page::Device;
 use super::stream::{CrdtId, LwwValue};
 
-/// Page layout defaults for Paper Pro, matching rmscene's
-/// `simple_text_document`. Pass a [`Device`] to
+/// Page layout defaults for Paper Pro. The x origin and the width match
+/// rmscene's `simple_text_document`; the top is this build's
+/// [`super::page::TEXT_TOP`] (rmscene uses 234). Pass a [`Device`] to
 /// [`markdown_to_root_text_for`] to override.
 pub const DEFAULT_POS_X: f64 = -468.0;
-pub const DEFAULT_POS_Y: f64 = 234.0;
+pub const DEFAULT_POS_Y: f64 = super::page::TEXT_TOP;
 pub const DEFAULT_WIDTH: f32 = 936.0;
 
 /// First-character CrdtId. Both rmscene's reference and observed

@@ -134,6 +134,14 @@ pub struct PageImage {
 pub const PAPER_PRO_WIDTH: u32 = 1620;
 pub const PAPER_PRO_HEIGHT: u32 = 2160;
 
+/// Where the typed-text frame starts, in device units from the top of the
+/// page. rmscene's `simple_text_document` uses 234, which left the first
+/// heading about 245 units down a 2,160-unit Paper Pro page: a wider top
+/// margin than the page needs (owner, on the tablet, 2026-09-18). Table
+/// images are anchored to the same value in `notebook.rs`, so the two
+/// cannot drift apart.
+pub const TEXT_TOP: f64 = 120.0;
+
 /// reMarkable device model. Each model has its own drawable surface and
 /// default text-frame layout. `push` uses this to set `SceneInfo`
 /// `paper_size`, the `RootTextBlock` frame dimensions, and the
@@ -161,11 +169,12 @@ impl Device {
 
     /// `(pos_x, pos_y, width)` defaults for a typed-text frame on this
     /// device. The frame is centred horizontally at roughly 58 % of the
-    /// drawable width, leaving comfortable margins on both sides.
+    /// drawable width, leaving comfortable margins on both sides. The top
+    /// is [`TEXT_TOP`] on every device.
     pub fn text_frame(self) -> (f64, f64, f32) {
         let (w, _h) = self.dimensions();
         let text_w = (w as f32) * 0.58;
-        (-(text_w as f64) / 2.0, 234.0, text_w)
+        (-(text_w as f64) / 2.0, TEXT_TOP, text_w)
     }
 
     /// Max width to use when embedding raster images (tables) on this
