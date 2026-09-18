@@ -1,16 +1,50 @@
 # Release checklist
 
-Three paths are supported, in roughly decreasing preference:
+This repository releases through **GitHub Actions**. The other two paths
+are upstream's, kept for reference, and are not used for the releases
+published here:
 
-- **CircleCI** (active default — runs on tag push, `.circleci/config.yml`)
-- **GitHub Actions** (parked under `.github/workflows-disabled/`,
-  re-enable with a single `git mv` if you'd rather use Actions)
-- **Local build + manual upload** (no CI required, useful for ad-hoc
-  releases or when you want full control)
+- **GitHub Actions** (active: `.github/workflows/release.yml` runs when a
+  tag matching `v*` is pushed, or by manual dispatch with a tag input)
+- **CircleCI** (upstream's config at `.circleci/config.yml`; not connected
+  to this repository)
+- **Local build + manual upload** (upstream's script, no CI required)
 
 ---
 
-## Path A — CircleCI
+## Path A: GitHub Actions (active)
+
+Two workflows live under `.github/workflows/`:
+
+- `ci.yml` runs on a push to `main`, on a pull request into `main` and by
+  manual dispatch: `rustfmt`, `clippy`, and the test suite on
+  `ubuntu-latest` and `macos-15-intel`. A push to any other branch does
+  not start it; compile a branch with
+  `gh workflow run ci.yml --ref <branch>`.
+- `release.yml` builds one target, `x86_64-apple-darwin`, on
+  `macos-15-intel` with `MACOSX_DEPLOYMENT_TARGET=13.0`, runs the tests on
+  that runner first, packages `rr`, `skills/`, `README.md` and `LICENSE`
+  into `rr-x86_64-apple-darwin.tar.gz`, and publishes it with its
+  `.sha256` file and a combined `SHA256SUMS`.
+
+Third-party actions are pinned to full commit SHAs, the default token is
+read-only, and only the publish job is granted `contents: write`.
+
+### Triggering
+
+Tag only a commit whose CI run on `main` is green:
+
+```bash
+git tag -a v0.3.6-jt.5 -m "rr 0.3.6-jt.5: <summary>"
+git push origin v0.3.6-jt.5
+```
+
+---
+
+## Path B: CircleCI (upstream's, not connected here)
+
+Upstream's notes, kept for reference. No CircleCI project is connected to
+this repository, so nothing below runs here.
 
 A working CircleCI config lives at `.circleci/config.yml`. It builds the
 same four targets via two jobs (macOS M1 covers both Apple targets
@@ -36,7 +70,11 @@ workflow. ~6–8 min end-to-end.
 
 ---
 
-## Path B — Local build + manual upload
+## Path C: Local build + manual upload (upstream's)
+
+Upstream's notes, kept for reference. The releases published in this
+repository are not built this way: every asset here is built and uploaded
+by the workflow in Path A.
 
 Useful for ad-hoc releases, or when you want the whole pipeline on your
 laptop.
@@ -80,23 +118,6 @@ INSTALL_DIR=/tmp/rr-test ./install.sh
 
 ---
 
-## Path C — GitHub Actions (parked)
-
-The Actions workflows live under `.github/workflows-disabled/`. To put
-the project back on Actions:
-
-```bash
-git mv .github/workflows-disabled/ci.yml      .github/workflows/ci.yml
-git mv .github/workflows-disabled/release.yml .github/workflows/release.yml
-git commit -m "ci: re-enable GitHub Actions"
-git push
-```
-
-Both workflows fire on the next push / tag. You can keep CircleCI in
-place — they don't conflict.
-
----
-
 ## Other free CI alternatives (not configured here)
 
 - **Cirrus CI** — free for public repos, native macOS + Linux runners.
@@ -109,6 +130,6 @@ place — they don't conflict.
 
 - [ ] `curl | bash` install works on a clean machine
 - [ ] `rr auth` flow works
-- [ ] `rr upload examples/format-test.md` produces a native notebook on
-      the tablet
-- [ ] Test on macOS Intel + Apple Silicon, Linux x86_64 + ARM64
+- [ ] `rr push <file.md> --dry-run` reports `lines removed: 0`, then a
+      real `rr push` produces a native notebook on the tablet
+- [ ] Test on macOS Intel, the one target this repository builds

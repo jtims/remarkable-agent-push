@@ -12,10 +12,11 @@ description: >
 
 `rr` is a Rust CLI that turns a markdown file into a native v6 reMarkable
 notebook (the yellow-icon, handwriting-editable kind) and uploads it via
-the device's cloud sync API. **Works on any reMarkable account — Connect
-not required.** Headings, paragraphs, bullets, and prose render as native
-typed text; tables render as raster PNGs embedded directly into the
-notebook page.
+the device's cloud sync API. Upstream reports that it works on any
+reMarkable account, with or without a Connect subscription; this build
+has only been tested on an account with Connect active. Headings,
+paragraphs, bullets, and prose render as native typed text; tables render
+as raster PNGs embedded directly into the notebook page.
 
 The agent's job:
 1. Build a well-structured markdown file from the conversation.
@@ -42,9 +43,18 @@ rr push <file.md> --title "Custom Name"  # override the doc title
 rr push <file.md> --device paper-pro     # default; also: paper-pro-move, rm2
 rr push - --title "From stdin"           # read markdown from stdin
 rr ls                                    # list cloud documents
-rr mkdir "Folder"                        # create a folder
-rr rm <doc-uuid>                         # delete by id
+rr ls --folders                          # list folders with their ids
+rr mkdir "Folder"                        # create a folder   (see the note below)
+rr rm <doc-uuid>                         # delete by id      (see the note below)
 ```
+
+`rr mkdir` and `rr rm` do not work in practice. They call the older
+document API, which answered HTTP 401 when this build was tested against
+a paired Paper Pro account with Connect active (2026-09-17). Do not call
+either one. Ask the user to create folders and delete documents on the
+tablet or in the reMarkable app, and push into an existing folder with
+`rr push <file.md> --parent <FOLDER_UUID>`, taking the id from
+`rr ls --folders`.
 
 There's also a hidden legacy command — `rr connect-push` — kept only as
 a fallback to the older EPUB→cloud-convert pipeline. Don't use it unless

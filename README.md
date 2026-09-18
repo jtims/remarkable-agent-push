@@ -28,6 +28,12 @@ pipeline, and tighter guardrails for agent use.
 | `rr root-restore <hash>`: a plan-only rollback of the root pointer to an earlier root; `--yes` performs it under the same generation guard as a push | The previous-root hash a push printed could not be acted on without handling the bearer token by hand | Jeremiah Tims |
 | `0.3.6-jt.4`: a document-API 401 is reported as a refusal that points to `rr status` first; `rr ls` reports entries it could not read and exits non-zero; `rr push` strips YAML frontmatter, strictly; `rr skills` refuses to overwrite a differing SKILL.md without `--force`; the page splitter ignores dash lines inside code fences; blank lines no longer inflate the table-position estimate | Every 401 was labeled "token expired"; a listing could silently omit entries; frontmatter landed as a stray first page; one command could replace a customized skill file; a fenced YAML example cut a page in two; uneven spacing around tables (fixed in part, the rest awaits on-device measurement) | Jeremiah Tims |
 
+Finding codes: commit and tag messages cite the six `0.3.6-jt.4` fixes as
+`F10` to `F15`, the numbers they carry in the source audit behind this
+build. In the order of the last row above: `F10` the 401 message, `F11`
+`rr ls`, `F13` frontmatter, `F14` `rr skills`, `F15` the page splitter,
+`F12` table spacing (fixed in part).
+
 Both upstream pull requests were unmerged upstream when they were merged
 here (2026-09-17); each diff was read line by line first. Audit and patch
 work was done with Claude Code as a pair programmer; commits carry a
