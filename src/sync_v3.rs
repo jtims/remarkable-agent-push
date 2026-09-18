@@ -43,7 +43,9 @@ use sha2::{Digest, Sha256};
 use crate::error::{Error, Result};
 use crate::notebook::Bundle;
 
+mod folder;
 mod inspect;
+pub use folder::{check_new_folder, FolderBundle};
 pub use inspect::{InspectedBlob, Inspection};
 
 const SYNC_HOST: &str = "https://internal.cloud.remarkable.com";
@@ -473,7 +475,13 @@ impl SyncClient {
         // 1. Snapshot files we need to push.
         let doc_uuid = bundle.doc_uuid.to_string();
         let files = bundle_files(bundle);
+        self.upload_doc(doc_uuid, files).await
+    }
 
+    /// The write path of a push, shared with `rr mkdir`: upload each blob,
+    /// then the document index and the rewritten root from `plan_root`,
+    /// then swap the root pointer under the generation guard.
+    async fn upload_doc(&self, doc_uuid: String, files: Vec<CloudFile>) -> Result<UploadResult> {
         // 2. PUT every blob with its rm-filename.
         let mut doc_entries: Vec<IndexEntry> = Vec::with_capacity(files.len());
         for f in &files {
@@ -530,6 +538,12 @@ impl SyncClient {
     pub async fn plan_bundle(&self, bundle: &Bundle) -> Result<PushPlan> {
         let doc_uuid = bundle.doc_uuid.to_string();
         let files = bundle_files(bundle);
+        self.plan_doc(doc_uuid, files).await
+    }
+
+    /// The dry run of the shared write path: the plan `upload_doc` would
+    /// carry out, computed by the same `plan_root`. Reads only.
+    async fn plan_doc(&self, doc_uuid: String, files: Vec<CloudFile>) -> Result<PushPlan> {
         let doc_entries: Vec<IndexEntry> = files.iter().map(entry_for).collect();
 
         let root = self.load_root().await?;

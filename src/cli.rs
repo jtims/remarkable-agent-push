@@ -127,11 +127,23 @@ pub enum Command {
         folders: bool,
     },
 
-    /// Create a folder at root (or under --parent).
+    /// Create a folder at the top level, or inside --parent. Writes
+    /// through the cloud sync API the way `push` adds a document: one new
+    /// line in the root index. Run it with --dry-run first.
     Mkdir {
+        /// The folder name, as the tablet will show it. One name, not a
+        /// path.
         name: String,
-        #[arg(short, long)]
+
+        /// Parent folder UUID; the folder is made inside it instead of at
+        /// the top level. Get folder ids from `rr ls --folders`.
+        #[arg(short, long, value_name = "FOLDER_UUID")]
         parent: Option<String>,
+
+        /// Show what the command would change in the cloud root index and
+        /// upload nothing. Reads the listing and the current root.
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Delete a document or folder by id.
@@ -277,7 +289,11 @@ async fn dispatch(command: Command) -> Result<()> {
             background,
         } => handle_connect_push(file, title, folder, dir, format, background).await,
         Command::Ls { folders } => handle_ls(folders).await,
-        Command::Mkdir { name, parent } => handle_mkdir(name, parent).await,
+        Command::Mkdir {
+            name,
+            parent,
+            dry_run,
+        } => handle_mkdir(name, parent, dry_run).await,
         Command::Rm { id } => handle_rm(id).await,
         Command::Inspect { id, root } => handle_inspect(id, root).await,
         Command::RootRestore { hash, yes } => handle_root_restore(hash, yes).await,
@@ -816,16 +832,59 @@ async fn handle_ls(folders_only: bool) -> Result<()> {
     Ok(())
 }
 
-async fn handle_mkdir(name: String, parent: Option<String>) -> Result<()> {
-    let (_cfg, client) = cloud_client().await?;
-    let item = client
-        .create_folder(&name, parent.as_deref())
-        .await
-        .map_err(map_rr_err)?;
-    println!("{} Folder '{}' created.", "✓".green(), name);
-    if !item.id.is_empty() {
-        println!("  ID: {}", item.id);
+/// Create one folder through sync v3. A complete listing comes first: the
+/// guards need every item's name and parent, and a listing that could not
+/// read every entry refuses the write.
+async fn handle_mkdir(name: String, parent: Option<String>, dry_run: bool) -> Result<()> {
+    // Same check as `rr push --parent`: folder ids are UUIDs.
+    let parent = match parent.as_deref().map(str::trim) {
+        Some(p) => {
+            uuid::Uuid::parse_str(p).map_err(|_| {
+                anyhow::anyhow!(
+                    "--parent '{p}' is not a folder UUID; run `rr ls --folders` to find folder ids"
+                )
+            })?;
+            Some(p.to_owned())
+        }
+        None => None,
+    };
+
+    let token = ensure_fresh_token().await?;
+    let client = crate::sync_v3::SyncClient::new(token).context("build sync client")?;
+    let listing = client.list_documents().await.map_err(map_rr_err)?;
+    crate::sync_v3::check_new_folder(&listing, &name, parent.as_deref())?;
+
+    let doc_uuid = uuid::Uuid::new_v4().to_string();
+    let now_ms = chrono::Utc::now().timestamp_millis().to_string();
+    let parent_field = parent.as_deref().unwrap_or("");
+    let folder = crate::sync_v3::FolderBundle::new(&doc_uuid, &name, parent_field, &now_ms)?;
+    println!("Folder '{}' as {}", name, folder.doc_uuid);
+    if let Some(p) = &parent {
+        println!("  parent folder: {p}");
     }
+
+    if dry_run {
+        let plan = client.plan_folder(&folder).await.context("plan folder")?;
+        println!("  metadata ({} bytes):", folder.metadata_json.len());
+        print!("{}", folder.metadata_json);
+        println!("  note: a real run draws a new folder id");
+        return report_push_plan(&plan);
+    }
+
+    println!("Uploading via cloud sync v3...");
+    let result = client
+        .upload_folder(&folder)
+        .await
+        .context("upload folder")?;
+    println!(
+        "{} folder {} (root gen {})",
+        "✓".green(),
+        result.doc_id,
+        result.new_generation
+    );
+    // Rollback handle: the root pointer as it stood before this write.
+    println!("  previous root: {}", result.previous_root_hash);
+    println!("  previous gen:  {}", result.previous_generation);
     Ok(())
 }
 

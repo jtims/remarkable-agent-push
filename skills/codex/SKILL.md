@@ -44,15 +44,23 @@ rr push <file.md> --device paper-pro     # default; also: paper-pro-move, rm2
 rr push - --title "From stdin"           # read markdown from stdin
 rr ls                                    # list cloud documents
 rr ls --folders                          # list folders with their ids
+rr mkdir "Folder" --dry-run              # plan a folder; writes nothing
 rr mkdir "Folder"                        # create a folder   (see the note below)
 rr rm <doc-uuid>                         # delete by id      (see the note below)
 ```
 
-`rr mkdir` and `rr rm` do not work in practice. They call the older
-document API, which answered HTTP 401 when this build was tested against
-a paired Paper Pro account with Connect active (2026-09-17). Do not call
-either one. Ask the user to create folders and delete documents on the
-tablet or in the reMarkable app, and push into an existing folder with
+`rr mkdir` (from `0.3.6-jt.6`) writes through the same sync v3
+endpoints as `rr push`, so it rewrites the account-wide root index.
+Create a folder only when the user asks for one. Run it with
+`--dry-run` first, and go ahead only if the plan shows 0 lines removed
+and 1 line added; it takes one name, and `--parent <FOLDER_UUID>` nests
+it. The id a dry run prints is not kept: take the new folder's id from
+the real run's output or from `rr ls --folders`. `rr rm` does not work
+in practice. It calls the older document
+API, which answered HTTP 401 when this build was tested against a
+paired Paper Pro account with Connect active (2026-09-17). Do not call
+it. Ask the user to delete documents on the tablet or in the
+reMarkable app. Push into a folder with
 `rr push <file.md> --parent <FOLDER_UUID>`, taking the id from
 `rr ls --folders`.
 

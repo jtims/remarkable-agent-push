@@ -298,17 +298,29 @@ markdown into multiple pages with `---` horizontal-rule lines.
 rr ls                    # list documents in the cloud
 rr ls --folders          # only show folders
 rr inspect <id>          # how one item is stored (read-only; see below)
-rr mkdir "Work/2026"     # create a folder   (see the note below)
+rr mkdir "Work"          # create a folder   (see the note below)
 rr rm <doc-uuid>         # delete by id      (see the note below)
 ```
 
-`rr ls` reads the same sync v3 endpoints `push` uses. `rr mkdir` and
-`rr rm` do not: they call the older document API (`/doc/v2/files`),
-which answered HTTP 401 when this build was tested against a paired
-Paper Pro account with Connect active (2026-09-17). Treat both as not
-working. Create folders and delete documents on the tablet or in the
-reMarkable app, and target an existing folder with `--parent`.
-Rebuilding both commands on sync v3 is planned.
+`rr ls` reads the same sync v3 endpoints `push` uses, and from
+`0.3.6-jt.6` `rr mkdir` writes through them too. A folder is one new
+line in the root index, written with the same fail-closed parser, the
+same one-line check and the same guarded root swap as a push, and
+`rr mkdir <name> --dry-run` shows that line before anything is written
+(the folder id a dry run prints is not kept; a real run draws its own).
+The folder copies the shape the reMarkable software itself writes (one
+`.metadata` file, read from a real library with `rr inspect`). It takes
+one name, not a path; `--parent <FOLDER_UUID>` nests it. Before it
+writes, it reads a complete listing and refuses a name that is already
+in use where the folder would go, a parent that is missing, not a
+folder or in the trash, and a listing it could not read in full. A
+change made on another device after that read is not checked again.
+
+`rr rm` still calls the older document API (`/doc/v2/files`), which
+answered HTTP 401 when this build was tested against a paired Paper Pro
+account with Connect active (2026-09-17). Treat it as not working:
+delete documents on the tablet or in the reMarkable app. Rebuilding it
+on sync v3, as a move to the trash, is planned.
 
 `rr inspect <id>` prints how one document or folder is stored: its line
 in the root index, its own index, and its `.metadata` and `.content`
@@ -391,11 +403,12 @@ what renders well on the device.
   or in the reMarkable app.
 - Folder targeting is by id, not by name: `rr push --parent <FOLDER_UUID>`
   with ids from `rr ls --folders`.
-- `rr mkdir` and `rr rm` do not work in practice. They use the document
-  API, which upstream source comments describe as requiring a Connect
-  subscription and which returned HTTP 401 in testing even with one. From
+- `rr rm` does not work in practice. It uses the document API, which
+  upstream source comments describe as requiring a Connect subscription
+  and which returned HTTP 401 in testing even with one. From
   `0.3.6-jt.4` that 401 is reported as a refusal that points to
-  `rr status`, not as an expired token.
+  `rr status`, not as an expired token. `rr mkdir` no longer uses it
+  (from `0.3.6-jt.6`).
 - No inline emphasis. The v6 typed-text engine on Paper Pro doesn't have
   inline bold/italic/code styling; the text arrives, just without the
   styling. Code blocks, images embedded in markdown, and footnotes are
@@ -421,7 +434,7 @@ The binary contacts reMarkable hosts only:
 - `internal.cloud.remarkable.com`: sync v3, the endpoint every reMarkable
   device talks to. Pushes, listings and the root pointer go here.
 - `web.<region>.tectonic.remarkable.com`: the regional document API used
-  by `mkdir`, `rm` and the legacy pipeline.
+  by `rm` and the legacy pipeline.
 - The storage host named in a signed-upload redirect, which must be HTTPS
   and on an allowlist.
 
