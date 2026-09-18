@@ -35,8 +35,8 @@ read-only, and only the publish job is granted `contents: write`.
 Tag only a commit whose CI run on `main` is green:
 
 ```bash
-git tag -a v0.3.6-jt.5 -m "rr 0.3.6-jt.5: <summary>"
-git push origin v0.3.6-jt.5
+git tag -a v0.3.6-jt.6 -m "rr 0.3.6-jt.6: <summary>"
+git push origin v0.3.6-jt.6
 ```
 
 ---
