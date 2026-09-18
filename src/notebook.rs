@@ -191,7 +191,7 @@ impl PageInput {
             // reserved gaps for any earlier tables) accumulated before it
             // in the source...
             let height_before = table_text_heights.get(idx).copied().unwrap_or(0.0);
-            let text_based_y = (234.0 + height_before + 80.0).max(280.0);
+            let text_based_y = (234.0 + height_before + TABLE_TOP_MARGIN).max(280.0);
             // ...but never above the bottom of the previous table's image,
             // as a safety net on top of the reserved-space accounting above.
             let y = text_based_y.max(y_cursor);
@@ -289,33 +289,50 @@ fn split_on_hr(md: &str) -> Vec<String> {
 /// sourced value anywhere in rmscene/rmc/the Kaitai spec — still an
 /// unvalidated heuristic, not touched by this fix.
 ///
+/// Measured 2026-09-18 (F12 step 2) on a Paper Pro, from a four-page
+/// calibration notebook read in the vendor web app at 0.46 px per device
+/// unit and confirmed by eye on the tablet. A heading takes 88 units, not
+/// rmc's 150: the 62 extra units per heading pushed every table that far
+/// below the space reserved for it. A Plain paragraph takes 70; its
+/// wrapped lines sit 46 apart, and about 60 characters fit the 940-unit
+/// frame. Bullet height, and the wrap width of headings and bullets, were
+/// not measured and keep the old values.
+///
 /// A blank source line costs nothing: `v6::markdown` drops every empty
 /// paragraph before rendering (`paragraphs.retain(|p| !p.text.is_empty())`),
 /// so it occupies no space on the device. Charging height for it pushed
 /// each table image down, away from the space reserved for it.
 fn line_height_estimate(line: &str) -> f32 {
-    const HEADING: f32 = 150.0; // ParagraphStyle::Heading
+    const HEADING: f32 = 88.0; // ParagraphStyle::Heading, measured
     const PLAIN: f32 = 70.0; // ParagraphStyle::Plain / Bold
     const BULLET: f32 = 35.0; // ParagraphStyle::Bullet / Bullet2 / Checkbox*
     const BLANK: f32 = 0.0; // the encoder drops empty paragraphs
+    const PLAIN_WRAPPED: f32 = 46.0; // pitch of a wrapped Plain line, measured
+    const PLAIN_CHARS_PER_LINE: f32 = 60.0; // measured in the 940-unit frame
 
     let t = line.trim();
     if t.is_empty() {
         return BLANK;
     }
+    let chars = t.chars().count() as f32;
     let is_heading = t.starts_with('#');
     let is_bullet = t.starts_with("- ") || t.starts_with("* ");
-    let per_line = if is_heading {
-        HEADING
-    } else if is_bullet {
-        BULLET
-    } else {
-        PLAIN
-    };
-    let chars = t.chars().count();
-    let wrapped_lines = ((chars as f32 / 50.0).ceil()).max(1.0);
-    wrapped_lines * per_line
+    if is_heading || is_bullet {
+        // Not measured for these two styles: the old heuristic stays.
+        let per_line = if is_heading { HEADING } else { BULLET };
+        let wrapped_lines = (chars / 50.0).ceil().max(1.0);
+        return wrapped_lines * per_line;
+    }
+    let wrapped_lines = (chars / PLAIN_CHARS_PER_LINE).ceil().max(1.0);
+    PLAIN + (wrapped_lines - 1.0) * PLAIN_WRAPPED
 }
+
+/// Space between the end of the text above a table and the top of the
+/// table's image. The image is drawn at the start of the block reserved
+/// for it, plus this margin. It replaces an unexplained `+ 80`, which,
+/// together with the heading over-count, put the image at the very end
+/// of its block or past it (F12, measured 2026-09-18).
+const TABLE_TOP_MARGIN: f32 = 20.0;
 
 /// Remove GFM table source lines from a markdown string so the typed-text
 /// path doesn't render them as literal pipe-separated text; replace each
@@ -988,8 +1005,10 @@ mod tests {
         // mismatch, not the reserved-gap multiplier (tried and made no
         // difference), was the actual cause of tables clipping into the
         // heading immediately following them.
-        assert_eq!(line_height_estimate("# Heading"), 150.0);
-        assert_eq!(line_height_estimate("## Also a heading"), 150.0);
+        // 2026-09-18: the heading value is now the measured 88, not rmc's
+        // 150 (see the doc comment on line_height_estimate).
+        assert_eq!(line_height_estimate("# Heading"), 88.0);
+        assert_eq!(line_height_estimate("## Also a heading"), 88.0);
         assert_eq!(line_height_estimate("Plain paragraph text"), 70.0);
         assert_eq!(line_height_estimate("- Top-level bullet"), 35.0);
         assert_eq!(line_height_estimate("  - Nested bullet"), 35.0);
@@ -1016,10 +1035,43 @@ mod tests {
         let b = PageInput::from_markdown(loose);
         assert_eq!(a.images.len(), 1);
         assert_eq!(b.images.len(), 1);
-        // 234 (anchor) + 150 (heading) + 80: above the 280 floor, so the
-        // text-height path decided it, not the fallback.
-        assert_eq!(a.images[0].y, 464.0);
+        // 234 (anchor) + 88 (heading) + 20 (top margin): above the 280
+        // floor, so the text-height path decided it, not the fallback.
+        assert_eq!(a.images[0].y, 342.0);
         assert_eq!(a.images[0].y, b.images[0].y);
+    }
+
+    #[test]
+    fn wrapped_plain_lines_cost_less_than_new_paragraphs() {
+        // F12 step 2, measured: 60 characters per line, 46 per wrapped line.
+        let sixty = "x".repeat(60);
+        let sixty_one = "x".repeat(61);
+        let long = "x".repeat(120);
+        assert_eq!(line_height_estimate(&sixty), 70.0);
+        assert_eq!(line_height_estimate(&sixty_one), 116.0);
+        assert_eq!(line_height_estimate(&long), 116.0);
+    }
+
+    #[test]
+    fn table_y_matches_the_measured_calibration_pages() {
+        // The shapes of pages 2 and 3 of the 2026-09-18 calibration
+        // notebook. Measured ends of the text above each table: 670 and
+        // 437 device units. The image starts 20 below the estimate.
+        let table = "| T | B |\n| --- | --- |\n| a | b |\n";
+        let mut two = String::from("## Page two\n\n");
+        for n in 0..5 {
+            two.push_str(&format!("Short line {n}.\n\n"));
+        }
+        two.push_str(table);
+        let page_two = PageInput::from_markdown(&two);
+        // 234 + 88 + 5 * 70 + 20
+        assert_eq!(page_two.images[0].y, 692.0);
+
+        let long = "x".repeat(120);
+        let three = format!("## Page three\n\n{long}\n\n{table}");
+        let page_three = PageInput::from_markdown(&three);
+        // 234 + 88 + (70 + 46) + 20
+        assert_eq!(page_three.images[0].y, 458.0);
     }
 
     #[test]
@@ -1035,14 +1087,14 @@ mod tests {
     #[test]
     fn one_dash_delimiter_table_is_stripped_and_placed_by_its_text() {
         // F16. Before the fix the image was made, but the pipe rows stayed
-        // in the text and y fell back to 314 (234 + 0 + 80).
+        // in the text and y fell back to the no-text default.
         let md = "# Title\n\n| A | B |\n| - | - |\n| 1 | 2 |\n";
         let page = PageInput::from_markdown(md);
         let text = &page.markdown;
         assert_eq!(page.images.len(), 1);
         assert!(!text.contains("| A"), "{text:?}");
         assert!(!text.contains("| 1"), "{text:?}");
-        assert_eq!(page.images[0].y, 464.0);
+        assert_eq!(page.images[0].y, 342.0);
     }
 
     #[test]
@@ -1055,7 +1107,7 @@ mod tests {
         let text = &page.markdown;
         assert_eq!(page.images.len(), 2);
         let first = &page.images[0];
-        assert_eq!(first.y, 464.0);
+        assert_eq!(first.y, 342.0);
         assert!(page.images[1].y > first.y + first.h);
         assert!(!text.contains('|'), "{text:?}");
     }
@@ -1274,8 +1326,8 @@ mod tests {
         let page = PageInput::from_markdown(&md);
         assert_eq!(page.images.len(), 1);
         let y = page.images[0].y;
-        // Expected: 234 (anchor) + 150 (heading, sourced from rmc's
-        // LINE_HEIGHTS) + 0 (blank line) + 80 = 464. Generous upper bound
+        // Expected: 234 (anchor) + 88 (heading, measured) + 0 (blank
+        // line) + 20 (top margin) = 342. Generous upper bound
         // below -- the point of this test is that trailing content (which
         // would push y well past 1000 under the old whole-document-estimate
         // bug) has no effect, not pinning the exact constant.
